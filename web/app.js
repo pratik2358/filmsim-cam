@@ -435,18 +435,22 @@ async function shoot() {
   }
 }
 
+// iPhone/iPad: the share sheet's "Save Image" puts the photo in Photos (Safari can't save there directly).
+// Android and computers: a normal download, which lands in Downloads and shows up in the gallery app.
+const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS reports as a Mac
+
 async function saveBlob(blob, name) {
   const file = new File([blob], name, { type: 'image/jpeg' });
-  const mobile = matchMedia('(pointer: coarse)').matches;
-  if (mobile && navigator.canShare?.({ files: [file] })) {
-    await navigator.share({ files: [file] });   // iOS/Android: "Save Image" puts it in Photos
+  if (isAppleMobile && navigator.canShare?.({ files: [file] })) {
+    await navigator.share({ files: [file] });
     return;
   }
   const url = URL.createObjectURL(blob);
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  toast('Photo saved to your downloads');
+  toast(/Android/i.test(navigator.userAgent) ? 'Saved to Downloads, also in your gallery' : 'Photo saved to your downloads');
 }
 
 let thumbURL;
