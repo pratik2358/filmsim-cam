@@ -1,0 +1,355 @@
+import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
+
+struct CameraScreen: View {
+    @StateObject private var camera = CameraController()
+    @State private var library = FilmLibrary()
+
+    @AppStorage("filmID") private var filmID = "classic-chrome"
+    @AppStorage("intensity") private var intensity = 1.0
+    @AppStorage("grain") private var grain = 0          // 0 off, 1 weak, 2 strong
+    @AppStorage("grid") private var showGrid = false
+
+    @State private var focusPoint: CGPoint?
+    @State private var showBadge = false
+    @State private var pickerItem: PhotosPickerItem?
+    @State private var importing = false
+    @State private var showAbout = false
+    @State private var flashScreen = false
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var film: Film { library.film(id: filmID) ?? FilmLibrary.original }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            topBar
+            preview
+            controls
+        }
+        .background(Color.black.ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .task {
+            applyLook()
+            #if DEBUG
+            // Debug aid: `-demoImage /path/to/photo.jpg` previews a still (handy in the Simulator).
+            if let path = UserDefaults.standard.string(forKey: "demoImage"),
+               let image = CIImage(contentsOf: URL(fileURLWithPath: path), options: [.applyOrientationProperty: true]) {
+                camera.showStill(image)
+            }
+            #endif
+            await camera.start()
+        }
+        .onChange(of: filmID) { applyLook(); flashBadge() }
+        .onChange(of: intensity) { applyLook() }
+        .onChange(of: grain) { applyLook() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await camera.start() } } else if phase == .background { camera.stop() }
+        }
+        .onChange(of: pickerItem) { _, item in loadStill(item) }
+        .fileImporter(isPresented: $importing, allowedContentTypes: Self.lutTypes, allowsMultipleSelection: true) { result in
+            importLUTs(result)
+        }
+        .sheet(isPresented: $showAbout) { AboutView() }
+        .alert("FujiFilm Cam", isPresented: Binding(get: { camera.message != nil }, set: { if !$0 { camera.message = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: { Text(camera.message ?? "") }
+    }
+
+    // MARK: Top bar
+
+    private var topBar: some View {
+        HStack(spacing: 22) {
+            Button { cycleFlash() } label: { Image(systemName: camera.flash.symbol) }
+                .foregroundStyle(camera.flash == .off ? .white : .yellow)
+                .disabled(camera.isShowingStill)
+            Button { grain = (grain + 1) % 3 } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "circle.dotted")
+                    Text(["Grain off", "Grain weak", "Grain strong"][grain]).font(.caption.weight(.semibold))
+                }
+            }
+            .foregroundStyle(grain == 0 ? .white : .yellow)
+            Button { showGrid.toggle() } label: { Image(systemName: "grid") }
+                .foregroundStyle(showGrid ? .yellow : .white)
+            Spacer()
+            Menu {
+                Button { importing = true } label: { Label("Import LUT (.cube / Hald PNG)", systemImage: "square.and.arrow.down") }
+                Button { showAbout = true } label: { Label("About & credits", systemImage: "info.circle") }
+            } label: { Image(systemName: "ellipsis.circle") }
+        }
+        .font(.system(size: 18))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 20)
+        .frame(height: 44)
+    }
+
+    // MARK: Preview
+
+    private var preview: some View {
+        GeometryReader { geo in
+            ZStack {
+                FilmPreviewView(frames: camera.frames)
+                if showGrid { GridOverlay() }
+                if let p = focusPoint {
+                    RoundedRectangle(cornerRadius: 4).stroke(.yellow, lineWidth: 1.5)
+                        .frame(width: 72, height: 72)
+                        .position(x: p.x * geo.size.width, y: p.y * geo.size.height)
+                        .transition(.opacity)
+                }
+                statusOverlay
+                VStack {
+                    if showBadge {
+                        VStack(spacing: 2) {
+                            Text(film.name).font(.headline)
+                            Text(film.note).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.top, 14)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                    Spacer()
+                    if camera.status == .running && !camera.isShowingStill && camera.zoomStops.count > 1 { zoomPills }
+                    if camera.isShowingStill {
+                        Button { camera.showStill(nil); pickerItem = nil } label: {
+                            Label("Back to camera", systemImage: "camera.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .padding(.bottom, 12)
+                    }
+                }
+                if flashScreen { Color.black.opacity(0.7) }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { loc in
+                guard camera.status == .running, !camera.isShowingStill else { return }
+                let p = CGPoint(x: loc.x / geo.size.width, y: loc.y / geo.size.height)
+                camera.focus(at: p)
+                withAnimation { focusPoint = p }
+                Task { try? await Task.sleep(for: .seconds(1.2)); withAnimation { focusPoint = nil } }
+            }
+            .gesture(DragGesture(minimumDistance: 30).onEnded { v in
+                guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                stepFilm(v.translation.width < 0 ? 1 : -1)
+            })
+        }
+        .aspectRatio(3 / 4, contentMode: .fit)
+        .clipped()
+        .layoutPriority(1)
+    }
+
+    @ViewBuilder private var statusOverlay: some View {
+        if !camera.isShowingStill {
+            switch camera.status {
+            case .denied:
+                StatusCard(icon: "camera.fill", title: "Camera access is off",
+                           detail: "Allow camera access in Settings, or pick a photo to try the looks.") {
+                    Button("Open Settings") { UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!) }
+                }
+            case .unavailable:
+                StatusCard(icon: "camera.metering.unknown", title: "No camera available",
+                           detail: "This device has no camera (e.g. the Simulator). Pick a photo to preview the looks.") { EmptyView() }
+            case .failed(let msg):
+                StatusCard(icon: "exclamationmark.triangle", title: "Camera error", detail: msg) { EmptyView() }
+            default: EmptyView()
+            }
+        }
+    }
+
+    private var zoomPills: some View {
+        HStack(spacing: 6) {
+            ForEach(camera.zoomStops, id: \.self) { stop in
+                let selected = abs(camera.zoom - stop) < 0.05
+                Button { camera.setZoom(stop) } label: {
+                    Text(stop < 1 ? ".5" : "\(Int(stop.rounded()))" + (selected ? "×" : ""))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(selected ? .yellow : .white)
+                        .frame(width: 34, height: 34)
+                        .background(Circle().fill(.black.opacity(0.45)))
+                }
+            }
+        }
+        .padding(4)
+        .background(Capsule().fill(.black.opacity(0.25)))
+        .padding(.bottom, 12)
+    }
+
+    // MARK: Controls
+
+    private var controls: some View {
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Text("Strength").font(.caption).foregroundStyle(.secondary)
+                Slider(value: $intensity, in: 0...1)
+                    .tint(.yellow)
+                Text("\(Int(intensity * 100))%").font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
+            }
+            .padding(.horizontal, 20)
+            .opacity(film.source == .none ? 0.3 : 1)
+            .disabled(film.source == .none)
+
+            FilmStrip(library: library, selection: $filmID) { film in
+                library.delete(film)
+                if filmID == film.id { filmID = FilmLibrary.original.id }
+            }
+
+            let lastPhoto = camera.lastPhoto
+            HStack {
+                PhotosPicker(selection: $pickerItem, matching: .images) {
+                    Group {
+                        if let thumb = lastPhoto {
+                            Image(uiImage: thumb).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: "photo.on.rectangle").font(.system(size: 20)).foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 50, height: 50)
+                    .background(Color.white.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.3)))
+                }
+                .accessibilityLabel("Pick a photo to apply a look")
+                Spacer()
+                ShutterButton(busy: camera.isCapturing, label: camera.isShowingStill ? "Save" : nil) { shoot() }
+                    .disabled(!(camera.status == .running || camera.isShowingStill))
+                Spacer()
+                Button { camera.flip() } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 20, weight: .semibold))
+                        .frame(width: 50, height: 50)
+                        .background(Circle().fill(.white.opacity(0.12)))
+                }
+                .foregroundStyle(.white)
+                .disabled(camera.status != .running || camera.isShowingStill)
+                .accessibilityLabel("Switch camera")
+            }
+            .padding(.horizontal, 28)
+        }
+        .padding(.top, 14)
+        .padding(.bottom, 8)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    // MARK: Actions
+
+    private func applyLook() {
+        let lut = library.lut(for: film)
+        FilmRenderer.shared.configure(lut: lut, intensity: Float(intensity), grain: [0, 0.5, 1][grain])
+    }
+
+    private func flashBadge() {
+        withAnimation(.easeOut(duration: 0.2)) { showBadge = true }
+        let id = filmID
+        Task {
+            try? await Task.sleep(for: .seconds(1.4))
+            if id == filmID { withAnimation(.easeIn(duration: 0.3)) { showBadge = false } }
+        }
+    }
+
+    private func stepFilm(_ delta: Int) {
+        let all = library.films
+        guard let i = all.firstIndex(where: { $0.id == filmID }) else { return }
+        filmID = all[(i + delta + all.count) % all.count].id
+        UISelectionFeedbackGenerator().selectionChanged()
+    }
+
+    private func cycleFlash() {
+        let all = CameraController.Flash.allCases
+        camera.flash = all[(all.firstIndex(of: camera.flash)! + 1) % all.count]
+    }
+
+    private func shoot() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if !camera.isShowingStill {
+            flashScreen = true
+            withAnimation(.easeOut(duration: 0.25)) { flashScreen = false }
+        }
+        camera.capture()
+    }
+
+    private func loadStill(_ item: PhotosPickerItem?) {
+        guard let item else { return }
+        Task {
+            guard let data = try? await item.loadTransferable(type: Data.self),
+                  let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
+                camera.message = "Couldn't open that photo."
+                return
+            }
+            camera.showStill(image)
+        }
+    }
+
+    static let lutTypes: [UTType] = [UTType(filenameExtension: "cube") ?? .data, .png, .tiff]
+
+    private func importLUTs(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            var errors: [String] = []
+            var last: Film?
+            for url in urls {
+                do { last = try library.importLUT(from: url) }
+                catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+            }
+            if let last { filmID = last.id }
+            if !errors.isEmpty { camera.message = errors.joined(separator: "\n") }
+        case .failure(let error):
+            camera.message = error.localizedDescription
+        }
+    }
+}
+
+// MARK: - Pieces
+
+private struct GridOverlay: View {
+    var body: some View {
+        GeometryReader { g in
+            Path { p in
+                for i in 1...2 {
+                    let x = g.size.width * CGFloat(i) / 3, y = g.size.height * CGFloat(i) / 3
+                    p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: g.size.height))
+                    p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: g.size.width, y: y))
+                }
+            }
+            .stroke(.white.opacity(0.35), lineWidth: 0.5)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct ShutterButton: View {
+    let busy: Bool
+    let label: String?
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle().stroke(.white, lineWidth: 4).frame(width: 74, height: 74)
+                Circle().fill(.white).frame(width: 62, height: 62).scaleEffect(busy ? 0.85 : 1)
+                if busy { ProgressView().tint(.black) }
+                else if let label { Text(label).font(.caption.bold()).foregroundStyle(.black) }
+            }
+            .animation(.spring(duration: 0.2), value: busy)
+        }
+        .disabled(busy)
+        .accessibilityLabel(label ?? "Take photo")
+    }
+}
+
+private struct StatusCard<Actions: View>: View {
+    let icon: String, title: String, detail: String
+    @ViewBuilder let actions: () -> Actions
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 34))
+            Text(title).font(.headline)
+            Text(detail).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            actions()
+        }
+        .padding(24)
+        .frame(maxWidth: 300)
+    }
+}

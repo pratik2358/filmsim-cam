@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>FilmCam</title>
+  <meta name="description" content="A camera in your browser with film-simulation looks applied live. Runs entirely on your device.">
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-512.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="app">
+    <header class="topbar">
+      <button id="btn-torch" class="icon-btn" hidden aria-label="Torch" title="Torch">
+        <svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
+      </button>
+      <button id="btn-grain" class="chip-btn" aria-label="Grain">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-dasharray="2 3"/></svg>
+        <span id="grain-label">Grain off</span>
+      </button>
+      <button id="btn-grid" class="icon-btn" aria-label="Grid" title="Grid">
+        <svg viewBox="0 0 24 24"><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg>
+      </button>
+      <span class="spacer"></span>
+      <button id="btn-import" class="icon-btn" aria-label="Import LUT" title="Import a .cube or Hald CLUT">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v3h16v-3"/></svg>
+      </button>
+      <button id="btn-about" class="icon-btn" aria-label="About" title="About &amp; credits">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+      </button>
+    </header>
+
+    <section id="stage">
+      <div id="frame">
+        <canvas id="view"></canvas>
+        <div id="grid" hidden></div>
+        <div id="badge" class="badge"><strong id="badge-name"></strong><span id="badge-note"></span></div>
+        <div id="status" class="status" hidden>
+          <p id="status-title"></p>
+          <p id="status-detail"></p>
+          <button id="status-upload" class="pill">Upload a photo</button>
+        </div>
+        <button id="btn-back" class="pill floating" hidden>Back to camera</button>
+        <div id="shutter-flash"></div>
+      </div>
+    </section>
+
+    <section class="controls">
+      <label class="strength" id="strength-row">
+        <span>Strength</span>
+        <input id="strength" type="range" min="0" max="100" value="100">
+        <output id="strength-out">100%</output>
+      </label>
+      <div id="strip" class="strip" role="listbox" aria-label="Looks"></div>
+      <div class="bottom">
+        <button id="btn-upload" class="thumb-btn" aria-label="Upload a photo" title="Apply a look to a photo">
+          <img id="last-thumb" alt="" hidden>
+          <svg id="upload-icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/></svg>
+        </button>
+        <button id="btn-shutter" class="shutter" aria-label="Take photo"><span id="shutter-label"></span></button>
+        <button id="btn-flip" class="round-btn" aria-label="Switch camera" title="Switch camera">
+          <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/></svg>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <input id="file-photo" type="file" accept="image/*" hidden>
+  <input id="file-lut" type="file" accept=".cube,.png,image/png" multiple hidden>
+
+  <dialog id="about">
+    <form method="dialog">
+      <h2>FilmCam</h2>
+      <p>Every look is a 3D colour lookup table applied on your GPU to each camera frame, and to the full-resolution photo when you press the shutter. Nothing is uploaded: the camera feed and your photos never leave your device.</p>
+      <h3>Camera looks</h3>
+      <p>Provia, Velvia, Astia, Classic Chrome, Classic Neg., Nostalgic Neg., Reala Ace, Pro Neg., Eterna, Bleach Bypass and Acros are hand-tuned approximations built from colour recipes (tone curves, per-hue hue/saturation/lightness, split toning). They are not Fujifilm's own processing.</p>
+      <h3>Film stocks</h3>
+      <p>Adapted from the RawTherapee Film Simulation Collection (2015-09-20) by Pat David, Pavlov Dmitry and Michael Ezra, licensed <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a>. The original Hald CLUTs were resampled to 33³ samples; the adapted LUTs are shared under the same licence. <a href="luts/NOTICE.txt" target="_blank">Details and sources</a>.</p>
+      <h3>Your own LUTs</h3>
+      <p>Use the import button to add a <code>.cube</code> file or a Hald CLUT <code>.png</code>. Imported looks are kept in this browser; press and hold one to remove it.</p>
+      <p class="fine">Fujifilm and the film names are trademarks of FUJIFILM Corporation, used only to describe the look each preset aims for. This site is not affiliated with or endorsed by Fujifilm.</p>
+      <button class="pill" value="close">Done</button>
+    </form>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
