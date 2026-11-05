@@ -55,6 +55,7 @@ const state = {
   still: null,             // ImageBitmap | HTMLImageElement
   stream: null,
   torch: false,
+  lens: { deviceId: null, stops: [], current: null },
   focus: { point: null, locked: false, meterEV: 0, userEV: 0, hwExposure: false, hwFocus: false },
   dirty: true,
 };
@@ -188,7 +189,11 @@ async function startCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: state.facing }, width: { ideal: 4096 }, height: { ideal: 3072 } },
+      video: {
+        ...(state.lens.deviceId && state.facing === 'environment'
+          ? { deviceId: { exact: state.lens.deviceId } } : { facingMode: { ideal: state.facing } }),
+        width: { ideal: 4096 }, height: { ideal: 3072 },
+      },
     });
     if (req !== cameraRequest || document.hidden) { stream.getTracks().forEach((t) => t.stop()); return; }
     state.stream = stream;
@@ -198,8 +203,10 @@ async function startCamera() {
     hideStatus();
     setupTorch();
     setupFocus();
+    setupLenses();
   } catch (err) {
     if (req !== cameraRequest) return;
+    if (state.lens.deviceId) { state.lens.deviceId = null; return startCamera(); }   // that lens went away
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     showStatus(denied ? 'Camera access is off' : 'No camera found',
       denied ? 'Allow camera access for this site in your browser settings, or upload a photo to try the looks.'
@@ -227,6 +234,75 @@ async function toggleTorch() {
   state.torch = !state.torch;
   try { await track.applyConstraints({ advanced: [{ torch: state.torch }] }); } catch { state.torch = false; }
   $('btn-torch').classList.toggle('on', state.torch);
+}
+
+// ---------- Lenses (.5 / 1 / tele) ----------
+// iPhone Safari names each back camera, so we can pick a physical lens by deviceId.
+// Elsewhere (mostly Android Chrome) the main camera usually offers a `zoom` control that
+// switches lenses by itself; failing both, we list the back cameras as numbered buttons.
+const IOS_LENSES = [
+  [/ultra wide/i, 0.5, '.5'],
+  [/telephoto/i, 3, 'Tele'],
+  [/^back camera$/i, 1, '1'],
+];
+
+async function setupLenses() {
+  const L = state.lens; L.stops = [];
+  const t = track();
+  if (!t || state.facing !== 'environment') return drawLenses();
+  const cams = (await navigator.mediaDevices.enumerateDevices().catch(() => []))
+    .filter((d) => d.kind === 'videoinput' && !/front|user|facing front/i.test(d.label));
+  const currentId = t.getSettings?.().deviceId;
+  const ios = cams.map((d) => { const m = IOS_LENSES.find(([re]) => re.test(d.label)); return m && { kind: 'device', id: d.deviceId, order: m[1], label: m[2], zoomLabel: true }; }).filter(Boolean);
+  const caps = t.getCapabilities?.() || {};
+  if (ios.length > 1) {
+    L.stops = ios.sort((a, b) => a.order - b.order);
+    L.current = L.stops.find((s) => s.id === currentId)?.label ?? '1';
+  } else if (caps.zoom && caps.zoom.max >= 1.9) {
+    const zs = [caps.zoom.min <= 0.6 ? 0.5 : null, 1, 2, caps.zoom.max >= 4.9 ? 5 : caps.zoom.max >= 2.9 ? 3 : null]
+      .filter((z) => z !== null && z >= caps.zoom.min - 0.01 && z <= caps.zoom.max + 0.01);
+    L.stops = zs.map((z) => ({ kind: 'zoom', zoom: z, label: z === 0.5 ? '.5' : String(z), zoomLabel: true }));
+    const z = t.getSettings?.().zoom ?? 1;
+    L.current = L.stops.reduce((best, s) => Math.abs(s.zoom - z) < Math.abs(best.zoom - z) ? s : best, L.stops[0]).label;
+  } else {
+    const backs = cams.filter((d) => /back|environment|rear/i.test(d.label) || cams.length > 1);
+    if (backs.length > 1) {
+      L.stops = backs.map((d, i) => ({ kind: 'device', id: d.deviceId, label: String(i + 1), name: d.label || `Camera ${i + 1}` }));
+      L.current = L.stops.find((s) => s.id === currentId)?.label ?? '1';
+    }
+  }
+  drawLenses();
+}
+
+async function pickLens(stop) {
+  const L = state.lens;
+  if (stop.label === L.current) return;
+  L.current = stop.label; drawLenses();
+  if (stop.kind === 'zoom') {
+    try { await track()?.applyConstraints({ advanced: [{ zoom: stop.zoom }] }); } catch { toast('This camera can’t zoom here.'); }
+    resetFocus();
+  } else {
+    L.deviceId = stop.id;
+    await startCamera();
+  }
+}
+
+function drawLenses() {
+  const el = $('lenses'), L = state.lens;
+  const show = state.mode === 'camera' && !!state.stream && L.stops.length > 1;
+  el.hidden = !show;
+  if (!show) return;
+  el.textContent = '';
+  for (const s of L.stops) {
+    const b = document.createElement('button');
+    const on = s.label === L.current;
+    b.className = 'lens' + (on ? ' on' : '');
+    b.textContent = on && s.zoomLabel && /^[.\d]/.test(s.label) ? s.label + '×' : s.label;
+    b.setAttribute('aria-label', s.name || `Lens ${s.label}`);
+    if (s.name) b.title = s.name;
+    b.onclick = (e) => { e.stopPropagation(); pickLens(s); };
+    el.appendChild(b);
+  }
 }
 
 // ---------- Focus & exposure ----------
@@ -706,6 +782,7 @@ function updateUI() {
   $('btn-torch').hidden = still || $('btn-torch').hidden;
   if (still) hideStatus();
   drawFocusUI(false);
+  drawLenses();
 }
 
 function showStatus(title, detail) {
@@ -729,7 +806,7 @@ function bindUI() {
   $('status-upload').onclick = () => $('file-photo').click();
   $('btn-back').onclick = backToCamera;
   $('btn-shutter').onclick = shoot;
-  $('btn-flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; store.set('facing', state.facing); startCamera(); };
+  $('btn-flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; store.set('facing', state.facing); state.lens.stops = []; drawLenses(); startCamera(); };
   $('strength').oninput = (e) => { state.intensity = e.target.value / 100; store.set('intensity', state.intensity); state.dirty = true; updateUI(); };
   $('file-photo').onchange = (e) => { const f = e.target.files[0]; if (f) openPhoto(f); e.target.value = ''; };
   $('file-lut').onchange = (e) => { const fs = [...e.target.files]; if (fs.length) importLUTs(fs); e.target.value = ''; };

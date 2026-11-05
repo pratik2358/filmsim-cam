@@ -49,9 +49,15 @@ final class PreviewMTKView: MTKView, MTKViewDelegate {
 
         let src = image.extent
         let scale = max(size.width / src.width, size.height / src.height)
-        let scaled = renderer.apply(to: image)
+        // Scale to screen size first so the look (and portrait blur) only run on visible pixels.
+        var scaled = image
             .transformed(by: CGAffineTransform(translationX: -src.minX, y: -src.minY))
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let portrait = Portrait.settings.withLock { $0 }
+        if portrait.enabled, let d = frames.disparity, let focus = portrait.focusDisparity {
+            scaled = Portrait.previewBlur(scaled, disparity: d, focus: focus, aperture: portrait.aperture)
+        }
+        scaled = renderer.apply(to: scaled)
         let dx = (size.width - src.width * scale) / 2, dy = (size.height - src.height * scale) / 2
         let placed = scaled.transformed(by: CGAffineTransform(translationX: dx, y: dy))
             .composited(over: CIImage(color: .black))

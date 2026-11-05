@@ -10,6 +10,8 @@ struct CameraScreen: View {
     @AppStorage("intensity") private var intensity = 1.0
     @AppStorage("grain") private var grain = 0          // 0 off, 1 weak, 2 strong
     @AppStorage("grid") private var showGrid = false
+    @AppStorage("portrait") private var wantPortrait = false
+    @AppStorage("aperture") private var aperture = 2.8
 
     @State private var touch: Touch?
     @State private var holdTask: Task<Void, Never>?
@@ -41,8 +43,11 @@ struct CameraScreen: View {
                 camera.showStill(image)
             }
             #endif
+            camera.setAperture(Float(aperture))
             await camera.start()
+            if wantPortrait { camera.setPortrait(true) }
         }
+        .onChange(of: aperture) { camera.setAperture(Float(aperture)) }
         .onChange(of: filmID) { applyLook(); flashBadge() }
         .onChange(of: intensity) { applyLook() }
         .onChange(of: grain) { applyLook() }
@@ -75,6 +80,19 @@ struct CameraScreen: View {
             .foregroundStyle(grain == 0 ? .white : .yellow)
             Button { showGrid.toggle() } label: { Image(systemName: "grid") }
                 .foregroundStyle(showGrid ? .yellow : .white)
+            if camera.portraitSupported && !camera.isShowingStill {
+                Button {
+                    wantPortrait.toggle()
+                    camera.setPortrait(wantPortrait)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "camera.aperture")
+                        Text("Portrait").font(.caption.weight(.semibold))
+                    }
+                }
+                .foregroundStyle(camera.isPortrait ? .yellow : .white)
+                .accessibilityLabel(camera.isPortrait ? "Portrait on" : "Portrait off")
+            }
             Spacer()
             Menu {
                 Button { importing = true } label: { Label("Import LUT (.cube / Hald PNG)", systemImage: "square.and.arrow.down") }
@@ -122,7 +140,7 @@ struct CameraScreen: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                     Spacer()
-                    if camera.status == .running && !camera.isShowingStill && camera.zoomStops.count > 1 { zoomPills }
+                    if camera.status == .running && !camera.isShowingStill && !camera.isPortrait && camera.zoomStops.count > 1 { zoomPills }
                     if camera.isShowingStill {
                         Button { camera.showStill(nil); pickerItem = nil } label: {
                             Label("Back to camera", systemImage: "camera.fill")
@@ -187,6 +205,19 @@ struct CameraScreen: View {
 
     private var controls: some View {
         VStack(spacing: 14) {
+            if camera.isPortrait && !camera.isShowingStill {
+                HStack(spacing: 12) {
+                    Text("Depth").font(.caption).foregroundStyle(.secondary)
+                    // Log scale so f/1.4–f/4 (where most of the change happens) gets most of the track.
+                    Slider(value: Binding(
+                        get: { log(16 / aperture) / log(16 / 1.4) },
+                        set: { aperture = (16 * pow(1.4 / 16, $0) * 10).rounded() / 10 }
+                    ), in: 0...1)
+                    .tint(.yellow)
+                    Text(String(format: "f/%.1f", aperture)).font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
+                }
+                .padding(.horizontal, 20)
+            }
             HStack(spacing: 12) {
                 Text("Strength").font(.caption).foregroundStyle(.secondary)
                 Slider(value: $intensity, in: 0...1)

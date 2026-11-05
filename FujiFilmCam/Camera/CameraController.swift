@@ -6,9 +6,12 @@ import os
 
 /// Latest unfiltered frame (or a still picked from the library) shared with the preview.
 final class FrameStore: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock<(CIImage?, Int)>(initialState: (nil, 0))
-    func set(_ image: CIImage?) { lock.withLock { $0 = (image, $0.1 + 1) } }
-    var current: (image: CIImage?, version: Int) { lock.withLock { ($0.0, $0.1) } }
+    private struct State { var image: CIImage?; var disparity: CIImage?; var version = 0 }
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+    func set(_ image: CIImage?) { lock.withLock { $0.image = image; $0.version += 1 } }
+    func setDisparity(_ d: CIImage?) { lock.withLock { $0.disparity = d } }
+    var current: (image: CIImage?, version: Int) { lock.withLock { ($0.image, $0.version) } }
+    var disparity: CIImage? { lock.withLock { $0.disparity } }
 }
 
 @MainActor
@@ -29,6 +32,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published var message: String?
     /// When true the preview shows a still image (from the library) instead of the live feed.
     @Published private(set) var isShowingStill = false
+    /// Portrait (depth) mode: needs a camera that can measure depth (dual back cameras or TrueDepth).
+    @Published private(set) var portraitSupported = false
+    @Published private(set) var isPortrait = false
 
     let frames = FrameStore()
 
@@ -37,6 +43,8 @@ final class CameraController: NSObject, ObservableObject {
     private let videoQueue = DispatchQueue(label: "camera.video", qos: .userInteractive)
     private let videoOutput = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
+    private let depthOutput = AVCaptureDepthDataOutput()
+    private let depthQueue = DispatchQueue(label: "camera.depth", qos: .userInteractive)
     private var input: AVCaptureDeviceInput?
     private var rotation: AVCaptureDevice.RotationCoordinator?
     private var zoomBase: CGFloat = 1                // device zoom factor that displays as "1×"
@@ -104,6 +112,8 @@ final class CameraController: NSObject, ObservableObject {
             setupZoom(for: device)
             resetToContinuous(device)
             self.position = position
+            portraitSupported = !device.activeFormat.supportedDepthDataFormats.isEmpty
+            if isPortrait { isPortrait = false; DispatchQueue.main.async { [weak self] in self?.setPortrait(true) } }
             return true
         } catch {
             status = .failed(error.localizedDescription)
@@ -176,6 +186,7 @@ final class CameraController: NSObject, ObservableObject {
         focusPoint = nil
         isFocusLocked = false
         exposureBias = 0
+        Portrait.settings.withLock { $0.focusPoint = CGPoint(x: 0.5, y: 0.5); $0.userFocused = false; $0.focusDisparity = nil }
     }
 
     /// Tap: focus & expose on `point` (normalized preview coords, portrait, origin top-left).
@@ -204,6 +215,7 @@ final class CameraController: NSObject, ObservableObject {
         focusPoint = point
         isFocusLocked = lock
         exposureBias = 0
+        Portrait.settings.withLock { $0.focusPoint = point; $0.userFocused = true; $0.focusDisparity = nil }
         observeSubjectArea(device)
     }
 
@@ -232,12 +244,71 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    // MARK: Portrait (depth)
+
+    func setPortrait(_ on: Bool) {
+        guard let device = input?.device else { return }
+        if on && !portraitSupported { return }
+        session.beginConfiguration()
+        if on {
+            if !session.outputs.contains(depthOutput), session.canAddOutput(depthOutput) {
+                session.addOutput(depthOutput)
+                depthOutput.isFilteringEnabled = true          // smooth, hole-filled depth
+                depthOutput.alwaysDiscardsLateDepthData = true
+                depthOutput.setDelegate(self, callbackQueue: depthQueue)
+            }
+            if let conn = depthOutput.connection(with: .depthData) {
+                if conn.isVideoRotationAngleSupported(90) { conn.videoRotationAngle = 90 }
+                if conn.isVideoMirroringSupported { conn.automaticallyAdjustsVideoMirroring = false; conn.isVideoMirrored = position == .front }
+            }
+            // Highest-resolution disparity format for the current video format.
+            let formats = device.activeFormat.supportedDepthDataFormats
+                .filter { CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DisparityFloat16 }
+            if let best = formats.max(by: { CMVideoFormatDescriptionGetDimensions($0.formatDescription).width < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width }),
+               (try? device.lockForConfiguration()) != nil {
+                device.activeDepthDataFormat = best
+                device.unlockForConfiguration()
+            }
+            photoOutput.isDepthDataDeliveryEnabled = photoOutput.isDepthDataDeliverySupported
+            photoOutput.isPortraitEffectsMatteDeliveryEnabled = photoOutput.isPortraitEffectsMatteDeliverySupported
+        } else {
+            if session.outputs.contains(depthOutput) { session.removeOutput(depthOutput) }
+            photoOutput.isPortraitEffectsMatteDeliveryEnabled = false
+            photoOutput.isDepthDataDeliveryEnabled = false
+        }
+        session.commitConfiguration()
+        let active = on && photoOutput.isDepthDataDeliveryEnabled
+        isPortrait = active
+        if active {
+            setZoom(1)                                        // depth comes from the 1× camera pair
+            // Stay inside a zoom range the camera can measure depth in.
+            if #available(iOS 17.2, *) {
+                let ranges = device.activeFormat.supportedVideoZoomRangesForDepthDataDelivery
+                if !ranges.isEmpty, !ranges.contains(where: { $0.contains(device.videoZoomFactor) }),
+                   let r = ranges.min(by: { abs($0.lowerBound - zoomBase) < abs($1.lowerBound - zoomBase) }),
+                   (try? device.lockForConfiguration()) != nil {
+                    device.videoZoomFactor = min(max(zoomBase, r.lowerBound), r.upperBound)
+                    device.unlockForConfiguration()
+                    zoom = device.videoZoomFactor / zoomBase
+                }
+            }
+        }
+        frames.setDisparity(nil)
+        Portrait.settings.withLock { $0.enabled = active; $0.focusDisparity = nil }
+        if on && !active { message = "Portrait isn't available with this camera." }
+    }
+
+    func setAperture(_ f: Float) {
+        Portrait.settings.withLock { $0.aperture = min(max(f, PortraitSettings.apertureRange.lowerBound), PortraitSettings.apertureRange.upperBound) }
+    }
+
     // MARK: Library stills
 
     func showStill(_ image: CIImage?) {
         stillSource = image
         isShowingStill = image != nil
         stillFlag.withLock { $0 = image != nil }
+        if image != nil { frames.setDisparity(nil) }
         frames.set(image)
     }
 
@@ -259,11 +330,22 @@ final class CameraController: NSObject, ObservableObject {
         if photoOutput.supportedFlashModes.contains(flash.mode) { settings.flashMode = flash.mode }
         settings.photoQualityPrioritization = .balanced
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+        let portrait = isPortrait && photoOutput.isDepthDataDeliveryEnabled
+        if portrait {
+            settings.isDepthDataDeliveryEnabled = true
+            settings.isDepthDataFiltered = true
+            settings.embedsDepthDataInPhoto = true
+            if photoOutput.isPortraitEffectsMatteDeliveryEnabled {
+                settings.isPortraitEffectsMatteDeliveryEnabled = true
+                settings.embedsPortraitEffectsMatteInPhoto = true
+            }
+        }
+        let portraitParams: PortraitSettings? = portrait ? Portrait.settings.withLock { $0 } : nil
         if let conn = photoOutput.connection(with: .video) {
             let angle = rotation?.videoRotationAngleForHorizonLevelCapture ?? 90
             if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
         }
-        let delegate = PhotoDelegate { [weak self] result in
+        let delegate = PhotoDelegate(portrait: portraitParams) { [weak self] result in
             Task { @MainActor in
                 self?.inFlight[settings.uniqueID] = nil
                 self?.finish(result)
@@ -297,6 +379,27 @@ extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     }
 }
 
+extension CameraController: AVCaptureDepthDataOutputDelegate {
+    nonisolated func depthDataOutput(_ output: AVCaptureDepthDataOutput, didOutput depthData: AVDepthData,
+                                     timestamp: CMTime, connection: AVCaptureConnection) {
+        let disparityData = depthData.depthDataType == kCVPixelFormatType_DisparityFloat16
+            ? depthData : depthData.converting(toDepthDataType: kCVPixelFormatType_DisparityFloat16)
+        var d = CIImage(cvPixelBuffer: disparityData.depthDataMap)
+        if !connection.isVideoRotationAngleSupported(90) {
+            d = d.oriented(connection.isVideoMirrored ? .leftMirrored : .right)
+        }
+        d = d.transformed(by: CGAffineTransform(translationX: -d.extent.minX, y: -d.extent.minY))
+        guard !stillFlag.withLock({ $0 }) else { frames.setDisparity(nil); return }
+        frames.setDisparity(d)
+        let point = Portrait.settings.withLock { $0.focusPoint }
+        if let v = Portrait.sampleDisparity(d, at: point, context: FilmRenderer.shared.context) {
+            Portrait.settings.withLock { s in
+                s.focusDisparity = s.focusDisparity.map { $0 * 0.8 + v * 0.2 } ?? v   // smooth over frames
+            }
+        }
+    }
+}
+
 /// Nonisolated mirror of `isShowingStill`, readable from the video queue.
 private let stillFlag = OSAllocatedUnfairLock(initialState: false)
 
@@ -304,7 +407,10 @@ private let stillFlag = OSAllocatedUnfairLock(initialState: false)
 
 private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
     let completion: (Result<PhotoProcessor.Output, Error>) -> Void
-    init(completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) { self.completion = completion }
+    let portrait: PortraitSettings?
+    init(portrait: PortraitSettings?, completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) {
+        self.portrait = portrait; self.completion = completion
+    }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         if let error { completion(.failure(error)); return }
@@ -312,9 +418,13 @@ private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unc
               let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
             completion(.failure(PhotoProcessor.Failure.encode)); return
         }
-        let completion = completion
+        let completion = completion, portrait = portrait
         DispatchQueue.global(qos: .userInitiated).async {
-            completion(PhotoProcessor.render(image, properties: image.properties))
+            var source = image
+            if let portrait, let blurred = PhotoProcessor.portraitBlur(data: data, oriented: image, settings: portrait) {
+                source = blurred
+            }
+            completion(PhotoProcessor.render(source, properties: image.properties))
         }
     }
 }
@@ -354,6 +464,31 @@ enum PhotoProcessor {
             from: filtered.extent.applying(CGAffineTransform(scaleX: thumbScale, y: thumbScale)).integral
         ).map { UIImage(cgImage: $0) }
         return .success(Output(data: data, thumbnail: thumb))
+    }
+
+    /// Background blur for a photo captured with depth, using Apple's portrait renderer
+    /// (it uses the depth map, the person cut-out matte and face positions when present).
+    static func portraitBlur(data: Data, oriented: CIImage, settings: PortraitSettings) -> CIImage? {
+        let ctx = FilmRenderer.shared.context
+        guard let filter = ctx.depthBlurEffectFilter(forImageData: data, options: [CIImageOption.applyOrientationProperty: true]) else { return nil }
+        filter.setValue(settings.aperture, forKey: "inputAperture")
+        if settings.userFocused {
+            // Normalized rect, Core Image coordinates (origin bottom-left).
+            let s: CGFloat = 0.12
+            let r = CGRect(x: settings.focusPoint.x - s / 2, y: (1 - settings.focusPoint.y) - s / 2, width: s, height: s)
+            filter.setValue(CIVector(cgRect: r), forKey: "inputFocusRect")
+        }
+        guard var out = filter.outputImage else { return nil }
+        // Some iOS versions return the un-rotated image; match the oriented photo.
+        let want = oriented.extent.size
+        if abs(out.extent.width - want.width) > 2 || abs(out.extent.height - want.height) > 2,
+           let raw = oriented.properties[kCGImagePropertyOrientation as String] as? UInt32,
+           let o = CGImagePropertyOrientation(rawValue: raw) {
+            out = out.oriented(o)
+        }
+        out = out.transformed(by: CGAffineTransform(translationX: -out.extent.minX, y: -out.extent.minY))
+        guard abs(out.extent.width - want.width) <= 2 else { return nil }
+        return out.cropped(to: CGRect(origin: .zero, size: want))
     }
 
     static func saveToLibrary(_ data: Data) async throws {
