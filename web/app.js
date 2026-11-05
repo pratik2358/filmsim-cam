@@ -50,6 +50,8 @@ const state = {
   intensity: store.get('intensity', 1),
   grain: store.get('grain', 0),
   grid: store.get('grid', false),
+  ratio: store.get('ratio', 'full'),   // 'full' = fill the screen (crops the edges) | 'fit' = the camera's whole frame
+  crop: { x: 0, y: 0, w: 1, h: 1 },   // part of the source that's visible (and saved)
   facing: store.get('facing', 'environment'),
   mode: 'camera',          // 'camera' | 'still'
   still: null,             // ImageBitmap | HTMLImageElement
@@ -68,8 +70,12 @@ const canvas = $('view');
 const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false, alpha: false });
 
 const VERT = `#version 300 es
-in vec2 aPos; out vec2 vUv; uniform bool uMirror;
-void main() { vUv = aPos * 0.5 + 0.5; if (uMirror) vUv.x = 1.0 - vUv.x; vUv.y = 1.0 - vUv.y; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+in vec2 aPos; out vec2 vUv; uniform bool uMirror; uniform vec4 uCrop;   // crop: x, y, w, h (top-left origin)
+void main() {
+  vUv = aPos * 0.5 + 0.5; if (uMirror) vUv.x = 1.0 - vUv.x; vUv.y = 1.0 - vUv.y;
+  vUv = uCrop.xy + vUv * uCrop.zw;
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
 const FRAG = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 outColor;
@@ -115,7 +121,7 @@ function initGL() {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
   gl.useProgram(prog);
-  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain']
+  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain', 'uCrop']
     .map((n) => [n, gl.getUniformLocation(prog, n)]));
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -152,8 +158,8 @@ function lutTexture(id) {
   return t;
 }
 
-/** Draws `source` (video / image) with the current look into the canvas at the source's resolution. */
-function render(source, w, h, { animateGrain = true, mirror = false } = {}) {
+/** Draws the `crop` part of `source` (video / image) with the current look into a w×h canvas. */
+function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL_CROP } = {}) {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   gl.viewport(0, 0, w, h);
   gl.activeTexture(gl.TEXTURE0);
@@ -170,6 +176,7 @@ function render(source, w, h, { animateGrain = true, mirror = false } = {}) {
   gl.uniform1f(loc.uGrainScale, Math.max(1, Math.min(w, h) / 1080));
   gl.uniform1f(loc.uSeed, animateGrain ? Math.random() * 1000 : 0);
   gl.uniform1i(loc.uMirror, mirror ? 1 : 0);
+  gl.uniform4f(loc.uCrop, crop.x, crop.y, crop.w, crop.h);
   gl.uniform1f(loc.uGain, state.mode === 'camera' ? Math.pow(2, softwareEV()) : 1);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
@@ -344,8 +351,10 @@ async function focusAt(x, y, lock) {
   const f = state.focus, t = track();
   if (!t) return;
   f.point = { x, y }; f.locked = lock; f.userEV = 0;
-  // The camera sees the unmirrored image.
-  const sx = state.facing === 'user' ? 1 - x : x;
+  // Viewfinder point -> camera frame (the viewfinder may show a crop). The camera sees the unmirrored image.
+  const cr = state.crop;
+  const fx = cr.x + x * cr.w; y = cr.y + y * cr.h;
+  const sx = state.facing === 'user' ? 1 - fx : fx;
   const caps = t.getCapabilities?.() || {};
   const c = {};
   if (caps.pointsOfInterest) c.pointsOfInterest = [{ x: sx, y }];
@@ -454,31 +463,62 @@ function sourceSize() {
 
 /** Preview renders at screen resolution (cheap); photos render at full resolution. */
 function previewSize(w, h) {
-  const el = $('frame');
-  const target = Math.max(el.clientWidth, el.clientHeight * (w / h)) * Math.min(2, devicePixelRatio || 1);
-  const s = Math.min(1, target / w);
-  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+  const cw = w * state.crop.w, ch = h * state.crop.h;
+  const s = Math.min(1, $('frame').clientWidth * Math.min(2, devicePixelRatio || 1) / cw);
+  return [Math.max(1, Math.round(cw * s)), Math.max(1, Math.round(ch * s))];
 }
 
 function frame() {
   if (state.capturing) { requestAnimationFrame(frame); return; }   // don't touch the canvas mid-encode
   if (state.mode === 'camera' && state.stream && video.readyState >= 2 && video.videoWidth) {
     const [w, h] = sourceSize();
-    setAspect(w, h);
-    render(video, ...previewSize(w, h), { mirror: state.facing === 'user' });
+    layoutFrame(w, h);
+    render(video, ...previewSize(w, h), { mirror: state.facing === 'user', crop: state.crop });
   } else if (state.mode === 'still' && state.still && state.dirty) {
     const [w, h] = sourceSize();
-    setAspect(w, h);
+    layoutFrame(w, h);
     render(state.still, ...previewSize(w, h), { animateGrain: false });
     state.dirty = false;
   }
   requestAnimationFrame(frame);
 }
 
-let lastAspect = '';
-function setAspect(w, h) {
-  const a = `${w} / ${h}`;
-  if (a !== lastAspect) { const f = $('frame'); f.style.setProperty('--aspect', a); f.style.setProperty('--ar', String(w / h)); lastAspect = a; }
+const FULL_CROP = Object.freeze({ x: 0, y: 0, w: 1, h: 1 });
+const isFull = () => state.ratio === 'full' && state.mode === 'camera';   // photos you open are always shown whole
+
+/** Sizes the viewfinder as large as the screen allows. 'full' fills the whole screen behind the bars
+ *  and crops the camera frame to match; 'fit' shows the whole frame, as wide as possible, centred
+ *  between the bars when it fits there, otherwise running under them. */
+let lastLayout = '';
+function layoutFrame(sw, sh) {
+  const app = $('app'), W = app.clientWidth, H = app.clientHeight;
+  const top = $('topbar').offsetHeight, bottom = $('controls').offsetTop + $('lenses').parentElement.offsetHeight;
+  const full = isFull();
+  const key = [sw, sh, W, H, top, bottom, full].join();
+  if (key === lastLayout) return;
+  lastLayout = key;
+  const ar = sw / sh;
+  let x = 0, y = 0, w = W, h = H;
+  if (!full) {
+    w = Math.min(W, H * ar); h = w / ar;
+    const gap = bottom - top;
+    y = h <= gap ? top + (gap - h) / 2 : Math.max(0, Math.min(top, H - h));
+    x = (W - w) / 2;
+  }
+  const f = $('frame').style;
+  f.left = `${x}px`; f.top = `${y}px`; f.width = `${w}px`; f.height = `${h}px`;
+  // Part of the camera frame the viewfinder shows (centred), which is also what gets saved.
+  const fa = w / h;
+  if (!full || Math.abs(fa - ar) < 1e-3) state.crop = FULL_CROP;
+  else if (fa < ar) { const cw = fa / ar; state.crop = { x: (1 - cw) / 2, y: 0, w: cw, h: 1 }; }
+  else { const ch = ar / fa; state.crop = { x: 0, y: (1 - ch) / 2, w: 1, h: ch }; }
+  $('ratio-label').textContent = full ? 'Full' : ratioName(sw, sh);
+}
+function ratioName(w, h) {
+  const r = Math.min(w, h) / Math.max(w, h), p = h >= w;
+  const known = [[3 / 4, '3:4', '4:3'], [9 / 16, '9:16', '16:9'], [2 / 3, '2:3', '3:2'], [1, '1:1', '1:1']];
+  const k = known.find(([v]) => Math.abs(v - r) < 0.02);
+  return k ? (p ? k[1] : k[2]) : 'Fit';
 }
 
 // ---------- Capture & save ----------
@@ -492,7 +532,8 @@ async function shoot() {
     render(state.still, w, h, { animateGrain: false });
   } else if (state.stream && video.videoWidth) {
     [w, h] = sourceSize();
-    render(video, w, h, { animateGrain: false, mirror: false });
+    const c = state.crop;   // save what the viewfinder shows
+    render(video, Math.round(w * c.w), Math.round(h * c.h), { animateGrain: false, mirror: false, crop: c });
     const f = $('shutter-flash'); f.classList.add('on'); requestAnimationFrame(() => f.classList.remove('on'));
   } else { state.capturing = false; return; }
   btn.classList.add('busy');
@@ -770,6 +811,9 @@ function updateUI() {
   $('grain-label').textContent = GRAIN_LABELS[state.grain];
   $('btn-grain').classList.toggle('on', state.grain > 0);
   $('btn-grid').classList.toggle('on', state.grid);
+  $('btn-ratio').disabled = still;
+  $('btn-ratio').setAttribute('aria-label', `Frame size: ${state.ratio === 'full' ? 'full screen' : 'whole camera frame'}`);
+  lastLayout = ''; state.dirty = true;
   $('grid').hidden = !state.grid;
   $('strength').value = Math.round(state.intensity * 100);
   $('strength-out').textContent = `${Math.round(state.intensity * 100)}%`;
@@ -800,6 +844,12 @@ function bindUI() {
   $('btn-grain').onclick = () => { state.grain = (state.grain + 1) % 3; store.set('grain', state.grain); state.dirty = true; updateUI(); };
   $('btn-grid').onclick = () => { state.grid = !state.grid; store.set('grid', state.grid); updateUI(); };
   $('btn-torch').onclick = toggleTorch;
+  $('btn-ratio').onclick = () => {
+    state.ratio = state.ratio === 'full' ? 'fit' : 'full'; store.set('ratio', state.ratio);
+    updateUI();
+    if (state.focus.point) resetFocus();   // the old point referred to the previous framing
+  };
+  addEventListener('resize', () => { lastLayout = ''; state.dirty = true; });
   $('btn-about').onclick = () => $('about').showModal();
   $('btn-import').onclick = () => $('file-lut').click();
   $('btn-upload').onclick = () => $('file-photo').click();

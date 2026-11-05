@@ -12,6 +12,7 @@ struct CameraScreen: View {
     @AppStorage("grid") private var showGrid = false
     @AppStorage("portrait") private var wantPortrait = false
     @AppStorage("aperture") private var aperture = 2.8
+    @AppStorage("frameRatio") private var frameRatio = FrameRatio.full
 
     @State private var touch: Touch?
     @State private var holdTask: Task<Void, Never>?
@@ -26,11 +27,32 @@ struct CameraScreen: View {
 
     private var film: Film { library.film(id: filmID) ?? FilmLibrary.original }
 
+    /// Viewfinder (and photo) shape. Full fills the whole screen; the others fill the width.
+    enum FrameRatio: String, CaseIterable {
+        case standard = "3:4", tall = "9:16", full = "Full"
+        var aspect: CGFloat? { switch self { case .standard: 3 / 4; case .tall: 9 / 16; case .full: nil } }
+        var next: FrameRatio { let all = Self.allCases; return all[(all.firstIndex(of: self)! + 1) % all.count] }
+    }
+
     var body: some View {
-        VStack(spacing: 0) {
-            topBar
-            preview
-            controls
+        // The viewfinder takes as much of the screen as it can; the bars float over it.
+        GeometryReader { geo in
+            ZStack(alignment: .top) {
+                viewfinder(in: geo.size)
+                VStack(spacing: 0) {
+                    topBar
+                        .background(LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
+                            .ignoresSafeArea(edges: .top))
+                    hud
+                    Spacer(minLength: 0)
+                    overlayRow
+                    controls
+                        .background(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black.opacity(0.6), location: 0.18),
+                                                           .init(color: .black.opacity(0.72), location: 1)],
+                                                   startPoint: .top, endPoint: .bottom)
+                            .ignoresSafeArea(edges: .bottom))
+                }
+            }
         }
         .background(Color.black.ignoresSafeArea())
         .preferredColorScheme(.dark)
@@ -67,19 +89,29 @@ struct CameraScreen: View {
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 22) {
+        HStack(spacing: 18) {
             Button { cycleFlash() } label: { Image(systemName: camera.flash.symbol) }
                 .foregroundStyle(camera.flash == .off ? .white : .yellow)
                 .disabled(camera.isShowingStill)
             Button { grain = (grain + 1) % 3 } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "circle.dotted")
-                    Text(["Grain off", "Grain weak", "Grain strong"][grain]).font(.caption.weight(.semibold))
+                    Text(["Grain", "Weak", "Strong"][grain]).font(.caption.weight(.semibold))
                 }
             }
             .foregroundStyle(grain == 0 ? .white : .yellow)
+            .accessibilityLabel(["Grain off", "Grain weak", "Grain strong"][grain])
             Button { showGrid.toggle() } label: { Image(systemName: "grid") }
                 .foregroundStyle(showGrid ? .yellow : .white)
+            Button { withAnimation(.easeInOut(duration: 0.25)) { frameRatio = frameRatio.next } } label: {
+                Text(frameRatio.rawValue)
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(minWidth: 30)
+                    .padding(.horizontal, 5).padding(.vertical, 3)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(lineWidth: 1.5))
+            }
+            .disabled(camera.isShowingStill)
+            .accessibilityLabel("Frame size \(frameRatio.rawValue)")
             if camera.portraitSupported && !camera.isShowingStill {
                 Button {
                     wantPortrait.toggle()
@@ -110,7 +142,7 @@ struct CameraScreen: View {
     private var preview: some View {
         GeometryReader { geo in
             ZStack {
-                FilmPreviewView(frames: camera.frames)
+                FilmPreviewView(frames: camera.frames, fit: camera.isShowingStill)
                 if showGrid { GridOverlay() }
                 if showFocusUI && !camera.isShowingStill {
                     FocusIndicator(bias: camera.exposureBias, locked: camera.isFocusLocked)
@@ -120,37 +152,6 @@ struct CameraScreen: View {
                         .allowsHitTesting(false)
                 }
                 statusOverlay
-                VStack {
-                    if camera.isFocusLocked && !camera.isShowingStill {
-                        Text("AE/AF LOCK")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.black)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.yellow, in: RoundedRectangle(cornerRadius: 4))
-                            .padding(.top, 12)
-                    }
-                    if showBadge {
-                        VStack(spacing: 2) {
-                            Text(film.name).font(.headline)
-                            Text(film.note).font(.caption).foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.top, 14)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                    Spacer()
-                    if camera.status == .running && !camera.isShowingStill && !camera.isPortrait && camera.zoomStops.count > 1 { zoomPills }
-                    if camera.isShowingStill {
-                        Button { camera.showStill(nil); pickerItem = nil } label: {
-                            Label("Back to camera", systemImage: "camera.fill")
-                                .font(.caption.weight(.semibold))
-                                .padding(.horizontal, 12).padding(.vertical, 7)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-                        .padding(.bottom, 12)
-                    }
-                }
                 if flashScreen { Color.black.opacity(0.7) }
             }
             .contentShape(Rectangle())
@@ -159,10 +160,64 @@ struct CameraScreen: View {
             .gesture(DragGesture(minimumDistance: 0)
                 .onChanged { v in touchChanged(v, size: geo.size) }
                 .onEnded { v in touchEnded(v, size: geo.size) })
+            .onAppear { camera.setViewfinderSize(geo.size) }
+            .onChange(of: geo.size) { _, size in camera.setViewfinderSize(size) }
         }
-        .aspectRatio(3 / 4, contentMode: .fit)
         .clipped()
-        .layoutPriority(1)
+    }
+
+    /// Places the viewfinder: Full covers the screen edge to edge (under the bars and the notch);
+    /// 3:4 and 9:16 span the full width, just under the top bar when there's room.
+    @ViewBuilder private func viewfinder(in size: CGSize) -> some View {
+        if let aspect = camera.isShowingStill ? 3 / 4 : frameRatio.aspect {
+            let w = min(size.width, size.height * aspect), h = w / aspect
+            preview
+                .frame(width: w, height: h)
+                .offset(y: min(44, max(0, size.height - h)))
+                .frame(maxWidth: .infinity)
+        } else {
+            preview.ignoresSafeArea()
+        }
+    }
+
+    /// Lock and look badges, under the top bar.
+    private var hud: some View {
+        VStack(spacing: 0) {
+            if camera.isFocusLocked && !camera.isShowingStill {
+                Text("AE/AF LOCK")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(.yellow, in: RoundedRectangle(cornerRadius: 4))
+                    .padding(.top, 8)
+            }
+            if showBadge {
+                VStack(spacing: 2) {
+                    Text(film.name).font(.headline)
+                    Text(film.note).font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.top, 10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// Zoom buttons / back-to-camera, just above the controls.
+    @ViewBuilder private var overlayRow: some View {
+        if camera.status == .running && !camera.isShowingStill && !camera.isPortrait && camera.zoomStops.count > 1 {
+            zoomPills
+        } else if camera.isShowingStill {
+            Button { camera.showStill(nil); pickerItem = nil } label: {
+                Label("Back to camera", systemImage: "camera.fill")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+            .padding(.bottom, 12)
+        }
     }
 
     @ViewBuilder private var statusOverlay: some View {
@@ -268,7 +323,6 @@ struct CameraScreen: View {
         .padding(.top, 14)
         .padding(.bottom, 8)
         .fixedSize(horizontal: false, vertical: true)
-        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: Touch: focus, exposure, lock, swipe

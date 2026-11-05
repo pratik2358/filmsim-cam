@@ -159,6 +159,35 @@ final class CameraController: NSObject, ObservableObject {
         } catch {}
     }
 
+    // MARK: Viewfinder framing
+
+    /// The part of the camera frame the viewfinder shows (normalized, portrait, top-left origin).
+    /// The viewfinder is aspect-filled, so a taller screen crops the sides; photos are cropped to match.
+    private(set) var visibleRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+    /// Called by the UI with the viewfinder's on-screen size.
+    func setViewfinderSize(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let src: CGFloat = {
+            guard let e = frames.current.image?.extent, e.width > 0, e.height > 0, !isShowingStill else { return 3 / 4 }
+            return e.width / e.height
+        }()
+        let view = size.width / size.height
+        let rect: CGRect
+        if abs(view - src) < 0.002 { rect = CGRect(x: 0, y: 0, width: 1, height: 1) }
+        else if view < src { let w = view / src; rect = CGRect(x: (1 - w) / 2, y: 0, width: w, height: 1) }
+        else { let h = src / view; rect = CGRect(x: 0, y: (1 - h) / 2, width: 1, height: h) }
+        if rect != visibleRect {
+            visibleRect = rect
+            if let device = input?.device, focusPoint != nil { resetToContinuous(device) }   // old tap is in the old framing
+        }
+    }
+
+    /// Viewfinder point -> camera-frame point.
+    private func framePoint(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: visibleRect.minX + p.x * visibleRect.width, y: visibleRect.minY + p.y * visibleRect.height)
+    }
+
     // MARK: Focus & exposure
 
     /// Where the user last tapped (normalized preview coords), nil when back on full auto.
@@ -194,8 +223,9 @@ final class CameraController: NSObject, ObservableObject {
     /// returns to full auto when the scene changes, like the system Camera app.
     func focus(at point: CGPoint, lock: Bool = false) {
         guard let device = input?.device else { return }
-        // Portrait UI point -> the sensor's landscape coordinate space.
-        var p = CGPoint(x: point.y, y: 1 - point.x)
+        let fp = framePoint(point)
+        // Portrait frame point -> the sensor's landscape coordinate space.
+        var p = CGPoint(x: fp.y, y: 1 - fp.x)
         if position == .front { p.y = 1 - p.y }
         do {
             try device.lockForConfiguration()
@@ -215,7 +245,7 @@ final class CameraController: NSObject, ObservableObject {
         focusPoint = point
         isFocusLocked = lock
         exposureBias = 0
-        Portrait.settings.withLock { $0.focusPoint = point; $0.userFocused = true; $0.focusDisparity = nil }
+        Portrait.settings.withLock { $0.focusPoint = fp; $0.userFocused = true; $0.focusDisparity = nil }
         observeSubjectArea(device)
     }
 
@@ -345,7 +375,7 @@ final class CameraController: NSObject, ObservableObject {
             let angle = rotation?.videoRotationAngleForHorizonLevelCapture ?? 90
             if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
         }
-        let delegate = PhotoDelegate(portrait: portraitParams) { [weak self] result in
+        let delegate = PhotoDelegate(portrait: portraitParams, crop: visibleRect.size) { [weak self] result in
             Task { @MainActor in
                 self?.inFlight[settings.uniqueID] = nil
                 self?.finish(result)
@@ -408,8 +438,9 @@ private let stillFlag = OSAllocatedUnfairLock(initialState: false)
 private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
     let completion: (Result<PhotoProcessor.Output, Error>) -> Void
     let portrait: PortraitSettings?
-    init(portrait: PortraitSettings?, completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) {
-        self.portrait = portrait; self.completion = completion
+    let crop: CGSize
+    init(portrait: PortraitSettings?, crop: CGSize, completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) {
+        self.portrait = portrait; self.crop = crop; self.completion = completion
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
@@ -418,12 +449,13 @@ private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unc
               let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
             completion(.failure(PhotoProcessor.Failure.encode)); return
         }
-        let completion = completion, portrait = portrait
+        let completion = completion, portrait = portrait, crop = crop
         DispatchQueue.global(qos: .userInitiated).async {
             var source = image
             if let portrait, let blurred = PhotoProcessor.portraitBlur(data: data, oriented: image, settings: portrait) {
                 source = blurred
             }
+            source = PhotoProcessor.centerCrop(source, portraitFraction: crop)   // save what the viewfinder showed
             completion(PhotoProcessor.render(source, properties: image.properties))
         }
     }
@@ -439,6 +471,16 @@ enum PhotoProcessor {
             case .permission: "Allow Photos access in Settings to save pictures."
             }
         }
+    }
+
+    /// Keeps the centred `portraitFraction` (width, height) of the image; swapped for a sideways photo.
+    static func centerCrop(_ image: CIImage, portraitFraction f: CGSize) -> CIImage {
+        guard f.width < 0.999 || f.height < 0.999 else { return image }
+        let e = image.extent
+        let (fw, fh) = e.width > e.height ? (f.height, f.width) : (f.width, f.height)
+        let w = (e.width * fw).rounded(), h = (e.height * fh).rounded()
+        let rect = CGRect(x: (e.minX + (e.width - w) / 2).rounded(), y: (e.minY + (e.height - h) / 2).rounded(), width: w, height: h)
+        return image.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
     }
 
     static func render(_ image: CIImage, properties: [String: Any]) -> Result<Output, Error> {

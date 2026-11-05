@@ -2,14 +2,16 @@ import SwiftUI
 import MetalKit
 import CoreImage
 
-/// Draws the latest camera frame with the current film look applied, aspect-filled.
+/// Draws the latest camera frame with the current film look applied, aspect-filled (centred crop).
 struct FilmPreviewView: UIViewRepresentable {
     let frames: FrameStore
+    /// Fit (letterbox) instead of fill: used for library photos so they're shown whole.
+    var fit = false
 
     func makeUIView(context: Context) -> PreviewMTKView {
         PreviewMTKView(frames: frames)
     }
-    func updateUIView(_ view: PreviewMTKView, context: Context) {}
+    func updateUIView(_ view: PreviewMTKView, context: Context) { view.fit = fit }
 }
 
 final class PreviewMTKView: MTKView, MTKViewDelegate {
@@ -18,6 +20,7 @@ final class PreviewMTKView: MTKView, MTKViewDelegate {
     private lazy var queue = device?.makeCommandQueue()
     private var drawn = (frame: -1, settings: -1, size: CGSize.zero)
     private let outputSpace = CGColorSpace(name: CGColorSpace.displayP3)!
+    var fit = false { didSet { if fit != oldValue { drawn.frame = -1 } } }
 
     init(frames: FrameStore) {
         self.frames = frames
@@ -48,7 +51,8 @@ final class PreviewMTKView: MTKView, MTKViewDelegate {
         drawn = (frameVersion, settingsVersion, size)
 
         let src = image.extent
-        let scale = max(size.width / src.width, size.height / src.height)
+        let sx = size.width / src.width, sy = size.height / src.height
+        let scale = fit ? min(sx, sy) : max(sx, sy)
         // Scale to screen size first so the look (and portrait blur) only run on visible pixels.
         var scaled = image
             .transformed(by: CGAffineTransform(translationX: -src.minX, y: -src.minY))

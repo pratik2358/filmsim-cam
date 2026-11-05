@@ -15,7 +15,7 @@
 </head>
 <body>
   <main id="app">
-    <header class="topbar">
+    <header class="topbar" id="topbar">
       <button id="btn-torch" class="icon-btn" hidden aria-label="Torch" title="Torch">
         <svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
       </button>
@@ -26,6 +26,7 @@
       <button id="btn-grid" class="icon-btn" aria-label="Grid" title="Grid">
         <svg viewBox="0 0 24 24"><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg>
       </button>
+      <button id="btn-ratio" class="chip-btn ratio-btn" aria-label="Frame size" title="Frame size"><span id="ratio-label">Full</span></button>
       <span class="spacer"></span>
       <button id="btn-import" class="icon-btn" aria-label="Import LUT" title="Import a .cube or Hald CLUT">
         <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v3h16v-3"/></svg>
@@ -48,20 +49,23 @@
             <span id="ev-label"></span>
           </div>
         </div>
-        <div id="ae-lock" class="ae-lock" hidden>AE/AF LOCK</div>
-        <div id="badge" class="badge"><strong id="badge-name"></strong><span id="badge-note"></span></div>
         <div id="status" class="status" hidden>
           <p id="status-title"></p>
           <p id="status-detail"></p>
           <button id="status-upload" class="pill">Upload a photo</button>
         </div>
-        <div id="lenses" class="lenses" hidden></div>
-        <button id="btn-back" class="pill floating" hidden>Back to camera</button>
         <div id="shutter-flash"></div>
       </div>
     </section>
 
-    <section class="controls">
+    <div id="ae-lock" class="ae-lock" hidden>AE/AF LOCK</div>
+    <div id="badge" class="badge"><strong id="badge-name"></strong><span id="badge-note"></span></div>
+
+    <section class="controls" id="controls">
+      <div class="lens-row">
+        <div id="lenses" class="lenses" hidden></div>
+        <button id="btn-back" class="pill" hidden>Back to camera</button>
+      </div>
       <label class="strength" id="strength-row">
         <span>Strength</span>
         <input id="strength" type="range" min="0" max="100" value="100">
