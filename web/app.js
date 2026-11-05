@@ -427,6 +427,7 @@ function bindViewfinderGestures() {
   const rel = (e) => { const r = el.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
   el.addEventListener('pointerdown', (e) => {
     if (e.target.closest('button')) return;
+    if (closePanels()) { t = null; return; }   // a tap on the picture first closes an open panel or menu
     el.setPointerCapture?.(e.pointerId);
     const [x, y] = rel(e);
     t = { x0: e.clientX, y0: e.clientY, x, y, axis: null, held: false, startEV: state.focus.userEV };
@@ -492,7 +493,9 @@ const isFull = () => state.ratio === 'full' && state.mode === 'camera';   // pho
 let lastLayout = '';
 function layoutFrame(sw, sh) {
   const app = $('app'), W = app.clientWidth, H = app.clientHeight;
-  const top = $('topbar').offsetHeight, bottom = $('controls').offsetTop + $('lenses').parentElement.offsetHeight;
+  // Lay out against the bar tops, not the look panel, so opening the panel never moves the frame.
+  const top = $('topbar').offsetHeight;
+  const bottom = $('chip-row').getBoundingClientRect().top - app.getBoundingClientRect().top;
   const full = isFull();
   const key = [sw, sh, W, H, top, bottom, full].join();
   if (key === lastLayout) return;
@@ -784,7 +787,9 @@ function addLongPress(el, fn) {
 
 function scrollToSelected(smooth = true) {
   const el = $('strip').querySelector(`[data-id="${CSS.escape(state.filmId)}"]`);
-  el?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: smooth ? 'smooth' : 'auto' });
+  const strip = $('strip');
+  if (!el || strip.offsetParent === null) return;   // panel closed: done when it opens
+  strip.scrollTo({ left: el.offsetLeft - (strip.clientWidth - el.offsetWidth) / 2, behavior: smooth ? 'smooth' : 'auto' });
 }
 
 let badgeTimer;
@@ -811,6 +816,7 @@ function updateUI() {
   $('grain-label').textContent = GRAIN_LABELS[state.grain];
   $('btn-grain').classList.toggle('on', state.grain > 0);
   $('btn-grid').classList.toggle('on', state.grid);
+  $('look-name').textContent = filmById(state.filmId)?.name || 'Original';
   $('btn-ratio').disabled = still;
   $('btn-ratio').setAttribute('aria-label', `Frame size: ${state.ratio === 'full' ? 'full screen' : 'whole camera frame'}`);
   lastLayout = ''; state.dirty = true;
@@ -840,7 +846,28 @@ function toast(msg, ms = 2600) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
+function setPanel(open) {
+  $('look-panel').hidden = !open;
+  $('controls').classList.toggle('open', open);
+  $('btn-look').setAttribute('aria-expanded', String(open));
+  if (open) scrollToSelected(false);
+}
+function setMenu(open) {
+  $('menu').hidden = !open;
+  $('btn-more').setAttribute('aria-expanded', String(open));
+}
+/** Closes the look panel and the menu; true if anything was open. */
+function closePanels() {
+  const was = !$('look-panel').hidden || !$('menu').hidden;
+  setPanel(false); setMenu(false);
+  return was;
+}
+
 function bindUI() {
+  $('btn-look').onclick = () => { setMenu(false); setPanel($('look-panel').hidden); };
+  $('btn-more').onclick = (e) => { e.stopPropagation(); setMenu($('menu').hidden); };
+  document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu, #btn-more')) setMenu(false); });
+  $('menu').addEventListener('click', (e) => { if (e.target.closest('#btn-import, #btn-about')) setMenu(false); });
   $('btn-grain').onclick = () => { state.grain = (state.grain + 1) % 3; store.set('grain', state.grain); state.dirty = true; updateUI(); };
   $('btn-grid').onclick = () => { state.grid = !state.grid; store.set('grid', state.grid); updateUI(); };
   $('btn-torch').onclick = toggleTorch;

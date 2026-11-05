@@ -23,6 +23,7 @@ struct CameraScreen: View {
     @State private var importing = false
     @State private var showAbout = false
     @State private var flashScreen = false
+    @State private var panel: Panel?
     @Environment(\.scenePhase) private var scenePhase
 
     private var film: Film { library.film(id: filmID) ?? FilmLibrary.original }
@@ -41,14 +42,15 @@ struct CameraScreen: View {
                 viewfinder(in: geo.size)
                 VStack(spacing: 0) {
                     topBar
-                        .background(LinearGradient(colors: [.black.opacity(0.55), .clear], startPoint: .top, endPoint: .bottom)
+                        .background(LinearGradient(colors: [.black.opacity(0.4), .clear], startPoint: .top, endPoint: .bottom)
                             .ignoresSafeArea(edges: .top))
                     hud
                     Spacer(minLength: 0)
                     overlayRow
                     controls
-                        .background(LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black.opacity(0.6), location: 0.18),
-                                                           .init(color: .black.opacity(0.72), location: 1)],
+                        .background(LinearGradient(stops: [.init(color: .clear, location: 0),
+                                                           .init(color: .black.opacity(panel == nil ? 0.25 : 0.6), location: 0.25),
+                                                           .init(color: .black.opacity(panel == nil ? 0.35 : 0.72), location: 1)],
                                                    startPoint: .top, endPoint: .bottom)
                             .ignoresSafeArea(edges: .bottom))
                 }
@@ -89,20 +91,10 @@ struct CameraScreen: View {
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 22) {
             Button { cycleFlash() } label: { Image(systemName: camera.flash.symbol) }
                 .foregroundStyle(camera.flash == .off ? .white : .yellow)
                 .disabled(camera.isShowingStill)
-            Button { grain = (grain + 1) % 3 } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "circle.dotted")
-                    Text(["Grain", "Weak", "Strong"][grain]).font(.caption.weight(.semibold))
-                }
-            }
-            .foregroundStyle(grain == 0 ? .white : .yellow)
-            .accessibilityLabel(["Grain off", "Grain weak", "Grain strong"][grain])
-            Button { showGrid.toggle() } label: { Image(systemName: "grid") }
-                .foregroundStyle(showGrid ? .yellow : .white)
             Button { withAnimation(.easeInOut(duration: 0.25)) { frameRatio = frameRatio.next } } label: {
                 Text(frameRatio.rawValue)
                     .font(.system(size: 11, weight: .bold))
@@ -127,6 +119,12 @@ struct CameraScreen: View {
             }
             Spacer()
             Menu {
+                Picker(selection: $grain) {
+                    Text("Off").tag(0); Text("Weak").tag(1); Text("Strong").tag(2)
+                } label: { Label("Grain", systemImage: "circle.dotted") }
+                .pickerStyle(.menu)
+                Toggle(isOn: $showGrid) { Label("Grid", systemImage: "grid") }
+                Divider()
                 Button { importing = true } label: { Label("Import LUT (.cube / Hald PNG)", systemImage: "square.and.arrow.down") }
                 Button { showAbout = true } label: { Label("About & credits", systemImage: "info.circle") }
             } label: { Image(systemName: "ellipsis.circle") }
@@ -258,9 +256,32 @@ struct CameraScreen: View {
 
     // MARK: Controls
 
+    /// Panels that open above the shutter; closed by default so the viewfinder stays clear.
+    enum Panel { case looks, depth }
+
     private var controls: some View {
-        VStack(spacing: 14) {
-            if camera.isPortrait && !camera.isShowingStill {
+        let showDepth = camera.isPortrait && !camera.isShowingStill
+        return VStack(spacing: 12) {
+            if panel == .looks {
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Text("Strength").font(.caption).foregroundStyle(.secondary)
+                        Slider(value: $intensity, in: 0...1)
+                            .tint(.yellow)
+                        Text("\(Int(intensity * 100))%").font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 20)
+                    .opacity(film.source == .none ? 0.3 : 1)
+                    .disabled(film.source == .none)
+
+                    FilmStrip(library: library, selection: $filmID) { film in
+                        library.delete(film)
+                        if filmID == film.id { filmID = FilmLibrary.original.id }
+                    }
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if panel == .depth && showDepth {
                 HStack(spacing: 12) {
                     Text("Depth").font(.caption).foregroundStyle(.secondary)
                     // Log scale so f/1.4–f/4 (where most of the change happens) gets most of the track.
@@ -272,20 +293,16 @@ struct CameraScreen: View {
                     Text(String(format: "f/%.1f", aperture)).font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
                 }
                 .padding(.horizontal, 20)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            HStack(spacing: 12) {
-                Text("Strength").font(.caption).foregroundStyle(.secondary)
-                Slider(value: $intensity, in: 0...1)
-                    .tint(.yellow)
-                Text("\(Int(intensity * 100))%").font(.caption.monospacedDigit()).frame(width: 40, alignment: .trailing)
-            }
-            .padding(.horizontal, 20)
-            .opacity(film.source == .none ? 0.3 : 1)
-            .disabled(film.source == .none)
 
-            FilmStrip(library: library, selection: $filmID) { film in
-                library.delete(film)
-                if filmID == film.id { filmID = FilmLibrary.original.id }
+            HStack(spacing: 8) {
+                PanelChip(title: film.name, open: panel == .looks) { toggle(.looks) }
+                    .accessibilityLabel("Look: \(film.name). Show looks")
+                if showDepth {
+                    PanelChip(title: String(format: "f/%.1f", aperture), open: panel == .depth) { toggle(.depth) }
+                        .accessibilityLabel("Background blur f/\(String(format: "%.1f", aperture))")
+                }
             }
 
             let lastPhoto = camera.lastPhoto
@@ -299,7 +316,7 @@ struct CameraScreen: View {
                         }
                     }
                     .frame(width: 50, height: 50)
-                    .background(Color.white.opacity(0.1))
+                    .background(Color.black.opacity(0.35))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.3)))
                 }
@@ -312,7 +329,7 @@ struct CameraScreen: View {
                     Image(systemName: "arrow.triangle.2.circlepath")
                         .font(.system(size: 20, weight: .semibold))
                         .frame(width: 50, height: 50)
-                        .background(Circle().fill(.white.opacity(0.12)))
+                        .background(Circle().fill(.black.opacity(0.35)))
                 }
                 .foregroundStyle(.white)
                 .disabled(camera.status != .running || camera.isShowingStill)
@@ -320,9 +337,13 @@ struct CameraScreen: View {
             }
             .padding(.horizontal, 28)
         }
-        .padding(.top, 14)
+        .padding(.top, 10)
         .padding(.bottom, 8)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func toggle(_ p: Panel) {
+        withAnimation(.easeOut(duration: 0.2)) { panel = panel == p ? nil : p }
     }
 
     // MARK: Touch: focus, exposure, lock, swipe
@@ -338,7 +359,7 @@ struct CameraScreen: View {
     private func touchChanged(_ v: DragGesture.Value, size: CGSize) {
         if touch == nil {
             touch = Touch(startBias: camera.exposureBias)
-            guard liveCamera else { return }
+            guard liveCamera, panel == nil else { return }
             let p = normalized(v.startLocation, size)
             holdTask = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(0.55))
@@ -370,6 +391,7 @@ struct CameraScreen: View {
         case .vertical:
             break
         case nil:
+            if panel != nil { withAnimation(.easeOut(duration: 0.2)) { panel = nil }; return }
             guard liveCamera, !t.held else { return }
             camera.focus(at: normalized(v.location, size))
             revealFocusUI()
@@ -540,5 +562,23 @@ private struct StatusCard<Actions: View>: View {
         }
         .padding(24)
         .frame(maxWidth: 300)
+    }
+}
+
+/// Small capsule above the shutter that opens a panel (looks, background blur).
+private struct PanelChip: View {
+    let title: String
+    let open: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(title).font(.caption.weight(.semibold)).lineLimit(1)
+                Image(systemName: open ? "chevron.down" : "chevron.up").font(.system(size: 9, weight: .bold))
+            }
+            .foregroundStyle(open ? .yellow : .white)
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(.black.opacity(0.45), in: Capsule())
+        }
     }
 }

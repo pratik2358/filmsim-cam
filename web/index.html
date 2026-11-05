@@ -19,22 +19,30 @@
       <button id="btn-torch" class="icon-btn" hidden aria-label="Torch" title="Torch">
         <svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
       </button>
-      <button id="btn-grain" class="chip-btn" aria-label="Grain">
+      <button id="btn-ratio" class="chip-btn ratio-btn" aria-label="Frame size" title="Frame size"><span id="ratio-label">Full</span></button>
+      <span class="spacer"></span>
+      <button id="btn-more" class="icon-btn" aria-label="More" title="More" aria-haspopup="menu" aria-expanded="false">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h.01M12 12h.01M16 12h.01" stroke-width="2.6"/></svg>
+      </button>
+    </header>
+    <div id="menu" class="menu" role="menu" hidden>
+      <button id="btn-grain" role="menuitem">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" stroke-dasharray="2 3"/></svg>
         <span id="grain-label">Grain off</span>
       </button>
-      <button id="btn-grid" class="icon-btn" aria-label="Grid" title="Grid">
+      <button id="btn-grid" role="menuitem">
         <svg viewBox="0 0 24 24"><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/></svg>
+        <span>Grid</span>
       </button>
-      <button id="btn-ratio" class="chip-btn ratio-btn" aria-label="Frame size" title="Frame size"><span id="ratio-label">Full</span></button>
-      <span class="spacer"></span>
-      <button id="btn-import" class="icon-btn" aria-label="Import LUT" title="Import a .cube or Hald CLUT">
+      <button id="btn-import" role="menuitem">
         <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v3h16v-3"/></svg>
+        <span>Import LUT (.cube / Hald PNG)</span>
       </button>
-      <button id="btn-about" class="icon-btn" aria-label="About" title="About &amp; credits">
+      <button id="btn-about" role="menuitem">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/></svg>
+        <span>About &amp; credits</span>
       </button>
-    </header>
+    </div>
 
     <section id="stage">
       <div id="frame">
@@ -66,12 +74,18 @@
         <div id="lenses" class="lenses" hidden></div>
         <button id="btn-back" class="pill" hidden>Back to camera</button>
       </div>
-      <label class="strength" id="strength-row">
-        <span>Strength</span>
-        <input id="strength" type="range" min="0" max="100" value="100">
-        <output id="strength-out">100%</output>
-      </label>
-      <div id="strip" class="strip" role="listbox" aria-label="Looks"></div>
+      <div id="look-panel" class="look-panel" hidden>
+        <label class="strength" id="strength-row">
+          <span>Strength</span>
+          <input id="strength" type="range" min="0" max="100" value="100">
+          <output id="strength-out">100%</output>
+        </label>
+        <div id="strip" class="strip" role="listbox" aria-label="Looks"></div>
+      </div>
+      <div class="chip-row" id="chip-row">
+        <button id="btn-look" class="look-chip" aria-expanded="false"><span id="look-name"></span>
+          <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
+      </div>
       <div class="bottom">
         <button id="btn-upload" class="thumb-btn" aria-label="Upload a photo" title="Apply a look to a photo">
           <img id="last-thumb" alt="" hidden>
