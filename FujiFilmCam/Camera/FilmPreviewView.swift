@@ -29,6 +29,8 @@ final class PreviewMTKView: MTKView, MTKViewDelegate {
         isOpaque = true
         backgroundColor = .black
         clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // Let touches through to the SwiftUI gestures (tap to focus, drag for exposure, swipe looks).
+        isUserInteractionEnabled = false
         delegate = self
     }
     required init(coder: NSCoder) { fatalError() }

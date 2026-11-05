@@ -11,7 +11,10 @@ struct CameraScreen: View {
     @AppStorage("grain") private var grain = 0          // 0 off, 1 weak, 2 strong
     @AppStorage("grid") private var showGrid = false
 
-    @State private var focusPoint: CGPoint?
+    @State private var touch: Touch?
+    @State private var holdTask: Task<Void, Never>?
+    @State private var showFocusUI = false
+    @State private var focusUIToken = 0
     @State private var showBadge = false
     @State private var pickerItem: PhotosPickerItem?
     @State private var importing = false
@@ -91,14 +94,23 @@ struct CameraScreen: View {
             ZStack {
                 FilmPreviewView(frames: camera.frames)
                 if showGrid { GridOverlay() }
-                if let p = focusPoint {
-                    RoundedRectangle(cornerRadius: 4).stroke(.yellow, lineWidth: 1.5)
-                        .frame(width: 72, height: 72)
-                        .position(x: p.x * geo.size.width, y: p.y * geo.size.height)
+                if showFocusUI && !camera.isShowingStill {
+                    FocusIndicator(bias: camera.exposureBias, locked: camera.isFocusLocked)
+                        .position(x: (camera.focusPoint?.x ?? 0.5) * geo.size.width,
+                                  y: (camera.focusPoint?.y ?? 0.5) * geo.size.height)
                         .transition(.opacity)
+                        .allowsHitTesting(false)
                 }
                 statusOverlay
                 VStack {
+                    if camera.isFocusLocked && !camera.isShowingStill {
+                        Text("AE/AF LOCK")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.yellow, in: RoundedRectangle(cornerRadius: 4))
+                            .padding(.top, 12)
+                    }
                     if showBadge {
                         VStack(spacing: 2) {
                             Text(film.name).font(.headline)
@@ -124,17 +136,11 @@ struct CameraScreen: View {
                 if flashScreen { Color.black.opacity(0.7) }
             }
             .contentShape(Rectangle())
-            .onTapGesture { loc in
-                guard camera.status == .running, !camera.isShowingStill else { return }
-                let p = CGPoint(x: loc.x / geo.size.width, y: loc.y / geo.size.height)
-                camera.focus(at: p)
-                withAnimation { focusPoint = p }
-                Task { try? await Task.sleep(for: .seconds(1.2)); withAnimation { focusPoint = nil } }
-            }
-            .gesture(DragGesture(minimumDistance: 30).onEnded { v in
-                guard abs(v.translation.width) > abs(v.translation.height) else { return }
-                stepFilm(v.translation.width < 0 ? 1 : -1)
-            })
+            // One gesture handles everything so they never fight:
+            // tap = focus/expose here · hold = AE/AF lock · drag up/down = exposure · swipe sideways = change look.
+            .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { v in touchChanged(v, size: geo.size) }
+                .onEnded { v in touchEnded(v, size: geo.size) })
         }
         .aspectRatio(3 / 4, contentMode: .fit)
         .clipped()
@@ -234,6 +240,73 @@ struct CameraScreen: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
+    // MARK: Touch: focus, exposure, lock, swipe
+
+    private struct Touch {
+        enum Axis { case horizontal, vertical }
+        var axis: Axis?
+        var startBias: Float
+        var held = false
+    }
+    private var liveCamera: Bool { camera.status == .running && !camera.isShowingStill }
+
+    private func touchChanged(_ v: DragGesture.Value, size: CGSize) {
+        if touch == nil {
+            touch = Touch(startBias: camera.exposureBias)
+            guard liveCamera else { return }
+            let p = normalized(v.startLocation, size)
+            holdTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(0.55))
+                guard !Task.isCancelled, touch?.axis == nil else { return }
+                touch?.held = true
+                camera.focus(at: p, lock: true)
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                revealFocusUI()
+            }
+        }
+        let d = v.translation
+        if touch?.axis == nil, hypot(d.width, d.height) > 12 {
+            touch?.axis = abs(d.width) > abs(d.height) ? .horizontal : .vertical
+            holdTask?.cancel()
+        }
+        if touch?.axis == .vertical, liveCamera, let start = touch?.startBias {
+            camera.setExposureBias(start - Float(d.height / 110))   // ~110 pt per stop, up = brighter
+            revealFocusUI()
+        }
+    }
+
+    private func touchEnded(_ v: DragGesture.Value, size: CGSize) {
+        holdTask?.cancel()
+        defer { touch = nil }
+        guard let t = touch else { return }
+        switch t.axis {
+        case .horizontal:
+            if abs(v.translation.width) > 40 { stepFilm(v.translation.width < 0 ? 1 : -1) }
+        case .vertical:
+            break
+        case nil:
+            guard liveCamera, !t.held else { return }
+            camera.focus(at: normalized(v.location, size))
+            revealFocusUI()
+        }
+    }
+
+    private func normalized(_ p: CGPoint, _ size: CGSize) -> CGPoint {
+        CGPoint(x: min(max(p.x / size.width, 0), 1), y: min(max(p.y / size.height, 0), 1))
+    }
+
+    /// Shows the focus box / exposure slider, then fades it after a moment (kept while locked).
+    private func revealFocusUI() {
+        withAnimation(.easeOut(duration: 0.15)) { showFocusUI = true }
+        focusUIToken += 1
+        let token = focusUIToken
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.2))
+            guard token == focusUIToken, !camera.isFocusLocked else { return }
+            withAnimation(.easeIn(duration: 0.4)) { showFocusUI = false }
+        }
+    }
+
     // MARK: Actions
 
     private func applyLook() {
@@ -317,6 +390,37 @@ private struct GridOverlay: View {
             .stroke(.white.opacity(0.35), lineWidth: 0.5)
         }
         .allowsHitTesting(false)
+    }
+}
+
+/// Yellow focus square with an exposure slider (sun) beside it, like the system Camera app.
+private struct FocusIndicator: View {
+    let bias: Float
+    let locked: Bool
+    private let track: CGFloat = 110
+
+    var body: some View {
+        let range = CameraController.exposureRange
+        let t = CGFloat((bias - range.lowerBound) / (range.upperBound - range.lowerBound))   // 0…1
+        ZStack {
+            RoundedRectangle(cornerRadius: 3)
+                .stroke(.yellow, lineWidth: locked ? 2 : 1.5)
+                .frame(width: 76, height: 76)
+            VStack(spacing: 0) {
+                Rectangle().fill(.yellow.opacity(0.85)).frame(width: 1, height: max(0, (1 - t) * track - 12))
+                Image(systemName: "sun.max.fill").font(.system(size: 15)).foregroundStyle(.yellow).frame(height: 24)
+                Rectangle().fill(.yellow.opacity(0.85)).frame(width: 1, height: max(0, t * track - 12))
+            }
+            .frame(height: track)
+            .offset(x: 56)
+            if abs(bias) >= 0.05 {
+                Text(String(format: "%+.1f", bias))
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.yellow)
+                    .offset(x: 56, y: track / 2 + 12)
+            }
+        }
+        .shadow(color: .black.opacity(0.4), radius: 2)
     }
 }
 

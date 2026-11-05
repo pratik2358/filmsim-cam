@@ -102,6 +102,7 @@ final class CameraController: NSObject, ObservableObject {
             }
             rotation = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
             setupZoom(for: device)
+            resetToContinuous(device)
             self.position = position
             return true
         } catch {
@@ -148,19 +149,87 @@ final class CameraController: NSObject, ObservableObject {
         } catch {}
     }
 
-    /// `point` is in normalized preview coordinates (0...1, portrait, origin top-left).
-    func focus(at point: CGPoint) {
+    // MARK: Focus & exposure
+
+    /// Where the user last tapped (normalized preview coords), nil when back on full auto.
+    @Published private(set) var focusPoint: CGPoint?
+    /// AE/AF lock (press and hold): stays put until the next tap, even if the scene changes.
+    @Published private(set) var isFocusLocked = false
+    /// Exposure compensation in EV.
+    @Published private(set) var exposureBias: Float = 0
+    static let exposureRange: ClosedRange<Float> = -2...2
+    private var subjectObserver: NSObjectProtocol?
+
+    /// Full auto: continuous focus & exposure on the centre, no compensation.
+    private func resetToContinuous(_ device: AVCaptureDevice) {
+        do {
+            try device.lockForConfiguration()
+            let centre = CGPoint(x: 0.5, y: 0.5)
+            if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = centre }
+            if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = centre }
+            if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            device.setExposureTargetBias(0, completionHandler: nil)
+            device.isSubjectAreaChangeMonitoringEnabled = false
+            device.unlockForConfiguration()
+        } catch {}
+        focusPoint = nil
+        isFocusLocked = false
+        exposureBias = 0
+    }
+
+    /// Tap: focus & expose on `point` (normalized preview coords, portrait, origin top-left).
+    /// With `lock`, the result is held until the next tap (AE/AF lock); otherwise the camera
+    /// returns to full auto when the scene changes, like the system Camera app.
+    func focus(at point: CGPoint, lock: Bool = false) {
         guard let device = input?.device else { return }
-        // Convert portrait UI point to the sensor's landscape coordinate space.
+        // Portrait UI point -> the sensor's landscape coordinate space.
         var p = CGPoint(x: point.y, y: 1 - point.x)
         if position == .front { p.y = 1 - p.y }
         do {
             try device.lockForConfiguration()
-            if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = p; device.focusMode = .autoFocus }
-            if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = p; device.exposureMode = .autoExpose }
-            device.isSubjectAreaChangeMonitoringEnabled = true
+            if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+                device.focusPointOfInterest = p
+                device.focusMode = .autoFocus          // focuses once on the point, then holds
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = p
+                if lock, device.isExposureModeSupported(.autoExpose) { device.exposureMode = .autoExpose }
+                else if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            }
+            device.setExposureTargetBias(0, completionHandler: nil)
+            device.isSubjectAreaChangeMonitoringEnabled = !lock
             device.unlockForConfiguration()
+        } catch { return }
+        focusPoint = point
+        isFocusLocked = lock
+        exposureBias = 0
+        observeSubjectArea(device)
+    }
+
+    func setExposureBias(_ ev: Float) {
+        guard let device = input?.device else { return }
+        let lo = max(device.minExposureTargetBias, Self.exposureRange.lowerBound)
+        let hi = min(device.maxExposureTargetBias, Self.exposureRange.upperBound)
+        let v = min(max(ev, lo), hi)
+        do {
+            try device.lockForConfiguration()
+            device.setExposureTargetBias(v, completionHandler: nil)
+            device.unlockForConfiguration()
+            exposureBias = v
         } catch {}
+    }
+
+    private func observeSubjectArea(_ device: AVCaptureDevice) {
+        if let subjectObserver { NotificationCenter.default.removeObserver(subjectObserver) }
+        subjectObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.subjectAreaDidChangeNotification, object: device, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.isFocusLocked, let device = self.input?.device else { return }
+                self.resetToContinuous(device)
+            }
+        }
     }
 
     // MARK: Library stills

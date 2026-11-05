@@ -39,6 +39,16 @@
       <div id="frame">
         <canvas id="view"></canvas>
         <div id="grid" hidden></div>
+        <div id="focus-ui" aria-hidden="true">
+          <div class="box"></div>
+          <div class="ev">
+            <i class="line ev-up"></i>
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>
+            <i class="line ev-down"></i>
+            <span id="ev-label"></span>
+          </div>
+        </div>
+        <div id="ae-lock" class="ae-lock" hidden>AE/AF LOCK</div>
         <div id="badge" class="badge"><strong id="badge-name"></strong><span id="badge-note"></span></div>
         <div id="status" class="status" hidden>
           <p id="status-title"></p>

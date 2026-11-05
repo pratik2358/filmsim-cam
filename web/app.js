@@ -55,6 +55,7 @@ const state = {
   still: null,             // ImageBitmap | HTMLImageElement
   stream: null,
   torch: false,
+  focus: { point: null, locked: false, meterEV: 0, userEV: 0, hwExposure: false, hwFocus: false },
   dirty: true,
 };
 window.filmcam = { state };   // handy for debugging in the browser console
@@ -72,7 +73,9 @@ const FRAG = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 outColor;
 uniform sampler2D uImage; uniform sampler3D uLut;
-uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed;
+uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed, uGain;
+vec3 toLin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
+vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float valueNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
@@ -80,6 +83,7 @@ float valueNoise(vec2 p) {
 }
 void main() {
   vec3 c = texture(uImage, vUv).rgb;
+  if (uGain != 1.0) c = toSrgb(clamp(toLin(c) * uGain, 0.0, 1.0));
   if (uHasLut) {
     const float N = ${LUT_SIZE}.0;
     vec3 l = texture(uLut, clamp(c, 0.0, 1.0) * ((N - 1.0) / N) + 0.5 / N).rgb;
@@ -110,7 +114,7 @@ function initGL() {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
   gl.useProgram(prog);
-  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror']
+  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain']
     .map((n) => [n, gl.getUniformLocation(prog, n)]));
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -165,6 +169,7 @@ function render(source, w, h, { animateGrain = true, mirror = false } = {}) {
   gl.uniform1f(loc.uGrainScale, Math.max(1, Math.min(w, h) / 1080));
   gl.uniform1f(loc.uSeed, animateGrain ? Math.random() * 1000 : 0);
   gl.uniform1i(loc.uMirror, mirror ? 1 : 0);
+  gl.uniform1f(loc.uGain, state.mode === 'camera' ? Math.pow(2, softwareEV()) : 1);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -192,6 +197,7 @@ async function startCamera() {
     await video.play().catch(() => {});
     hideStatus();
     setupTorch();
+    setupFocus();
   } catch (err) {
     if (req !== cameraRequest) return;
     const denied = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
@@ -221,6 +227,147 @@ async function toggleTorch() {
   state.torch = !state.torch;
   try { await track.applyConstraints({ advanced: [{ torch: state.torch }] }); } catch { state.torch = false; }
   $('btn-torch').classList.toggle('on', state.torch);
+}
+
+// ---------- Focus & exposure ----------
+const EV_RANGE = 2;
+const softwareEV = () => {
+  const f = state.focus;
+  return Math.max(-3, Math.min(3, f.meterEV + (f.hwExposure ? 0 : f.userEV)));   // meter ±2 plus your drag ±2, capped at ±3
+};
+const track = () => state.stream?.getVideoTracks()[0];
+
+function setupFocus() {
+  const caps = track()?.getCapabilities?.() || {};
+  const f = state.focus;
+  f.hwFocus = !!caps.pointsOfInterest || (caps.focusMode || []).includes('single-shot');
+  f.hwExposure = !!caps.exposureCompensation;
+  resetFocus(false);
+}
+
+async function applyTrack(c) {
+  try { await track()?.applyConstraints({ advanced: [c] }); return true; } catch { return false; }
+}
+
+function resetFocus(updateHw = true) {
+  const f = state.focus;
+  f.point = null; f.locked = false; f.meterEV = 0; f.userEV = 0;
+  if (updateHw && track()) {
+    const caps = track().getCapabilities?.() || {};
+    const c = {};
+    if ((caps.focusMode || []).includes('continuous')) c.focusMode = 'continuous';
+    if ((caps.exposureMode || []).includes('continuous')) c.exposureMode = 'continuous';
+    if (caps.exposureCompensation) c.exposureCompensation = 0;
+    if (Object.keys(c).length) applyTrack(c);
+  }
+  drawFocusUI();
+}
+
+let warnedFocus = false;
+async function focusAt(x, y, lock) {
+  const f = state.focus, t = track();
+  if (!t) return;
+  f.point = { x, y }; f.locked = lock; f.userEV = 0;
+  // The camera sees the unmirrored image.
+  const sx = state.facing === 'user' ? 1 - x : x;
+  const caps = t.getCapabilities?.() || {};
+  const c = {};
+  if (caps.pointsOfInterest) c.pointsOfInterest = [{ x: sx, y }];
+  const fm = caps.focusMode || [], em = caps.exposureMode || [];
+  if (fm.includes('single-shot')) c.focusMode = 'single-shot';
+  if (lock && em.includes('single-shot')) c.exposureMode = 'single-shot';
+  else if (em.includes('continuous')) c.exposureMode = 'continuous';
+  if (caps.exposureCompensation) c.exposureCompensation = 0;
+  const hwOK = Object.keys(c).length ? await applyTrack(c) : false;
+  // Without hardware metering at a point, meter the spot in software.
+  f.meterEV = caps.pointsOfInterest && hwOK ? 0 : spotMeterEV(sx, y);
+  if (!f.hwFocus && !warnedFocus) { warnedFocus = true; toast('This browser doesn’t let sites control focus, so tapping sets exposure only.', 3600); }
+  drawFocusUI();
+}
+
+/** EV that brings the tapped spot to mid-grey (software metering fallback). */
+const meterCanvas = document.createElement('canvas');
+function spotMeterEV(x, y) {
+  const w = 96, h = Math.max(1, Math.round(96 * video.videoHeight / video.videoWidth)) || 72;
+  meterCanvas.width = w; meterCanvas.height = h;
+  const ctx = meterCanvas.getContext('2d', { willReadFrequently: true });
+  try { ctx.drawImage(video, 0, 0, w, h); } catch { return 0; }
+  const r = 5, cx = Math.round(x * (w - 1)), cy = Math.round(y * (h - 1));
+  const d = ctx.getImageData(Math.max(0, cx - r), Math.max(0, cy - r), 2 * r + 1, 2 * r + 1).data;
+  let sum = 0, n = 0;
+  const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+  for (let i = 0; i < d.length; i += 4) { sum += 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]); n++; }
+  const y0 = Math.max(1e-4, sum / Math.max(1, n));
+  return Math.max(-EV_RANGE, Math.min(EV_RANGE, Math.log2(0.18 / y0)));
+}
+
+let evTimer;
+function setUserEV(ev) {
+  const f = state.focus;
+  f.userEV = Math.max(-EV_RANGE, Math.min(EV_RANGE, ev));
+  if (f.hwExposure) {
+    const c = track()?.getCapabilities?.().exposureCompensation;
+    if (c) {
+      const step = c.step || 0.1;
+      const v = Math.max(c.min, Math.min(c.max, Math.round(f.userEV / step) * step));
+      clearTimeout(evTimer); evTimer = setTimeout(() => applyTrack({ exposureCompensation: v }), 30);
+    }
+  }
+  drawFocusUI();
+}
+
+let focusFade;
+function drawFocusUI(reveal = true) {
+  const f = state.focus, ui = $('focus-ui');
+  const live = state.mode === 'camera' && !!state.stream;
+  $('ae-lock').hidden = !(live && f.locked);
+  const show = live && reveal && (f.point || Math.abs(f.userEV) > 0.01);
+  if (!show) { if (!f.locked) ui.classList.remove('show'); return; }
+  const p = f.point || { x: 0.5, y: 0.5 };
+  ui.style.left = `${p.x * 100}%`; ui.style.top = `${p.y * 100}%`;
+  const t = (f.userEV + EV_RANGE) / (2 * EV_RANGE);
+  ui.style.setProperty('--ev', String(t));
+  $('ev-label').textContent = Math.abs(f.userEV) >= 0.05 ? (f.userEV > 0 ? '+' : '') + f.userEV.toFixed(1) : '';
+  ui.classList.toggle('locked', f.locked);
+  ui.classList.add('show');
+  clearTimeout(focusFade);
+  if (!f.locked) focusFade = setTimeout(() => ui.classList.remove('show'), 2200);
+}
+
+/** One handler for the viewfinder: tap = focus/expose · double-tap = auto · hold = AE/AF lock ·
+ *  drag up/down = exposure · swipe sideways = change look. */
+function bindViewfinderGestures() {
+  const el = $('frame');
+  let t = null, lastTap = 0;
+  const rel = (e) => { const r = el.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height]; };
+  el.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    el.setPointerCapture?.(e.pointerId);
+    const [x, y] = rel(e);
+    t = { x0: e.clientX, y0: e.clientY, x, y, axis: null, held: false, startEV: state.focus.userEV };
+    const live = state.mode === 'camera' && state.stream;
+    if (live) t.hold = setTimeout(() => { if (t && !t.axis) { t.held = true; navigator.vibrate?.(15); focusAt(t.x, t.y, true); } }, 550);
+  });
+  el.addEventListener('pointermove', (e) => {
+    if (!t) return;
+    const dx = e.clientX - t.x0, dy = e.clientY - t.y0;
+    if (!t.axis && Math.hypot(dx, dy) > 12) { t.axis = Math.abs(dx) > Math.abs(dy) ? 'h' : 'v'; clearTimeout(t.hold); }
+    if (t.axis === 'v' && state.mode === 'camera' && state.stream) setUserEV(t.startEV - dy / 110);
+  });
+  const end = (e) => {
+    if (!t) return;
+    clearTimeout(t.hold);
+    const dx = e.clientX - t.x0, cur = t; t = null;
+    if (cur.axis === 'h') { if (Math.abs(dx) > 40) stepFilm(dx < 0 ? 1 : -1); return; }
+    if (cur.axis || cur.held || e.type === 'pointercancel') return;
+    if (!(state.mode === 'camera' && state.stream)) return;
+    const now = performance.now();
+    if (now - lastTap < 320) { lastTap = 0; resetFocus(); return; }
+    lastTap = now;
+    focusAt(cur.x, cur.y, false);
+  };
+  el.addEventListener('pointerup', end);
+  el.addEventListener('pointercancel', end);
 }
 
 // ---------- Render loop ----------
@@ -554,6 +701,7 @@ function updateUI() {
   $('btn-flip').disabled = still || !state.stream;
   $('btn-torch').hidden = still || $('btn-torch').hidden;
   if (still) hideStatus();
+  drawFocusUI(false);
 }
 
 function showStatus(title, detail) {
@@ -582,15 +730,7 @@ function bindUI() {
   $('file-photo').onchange = (e) => { const f = e.target.files[0]; if (f) openPhoto(f); e.target.value = ''; };
   $('file-lut').onchange = (e) => { const fs = [...e.target.files]; if (fs.length) importLUTs(fs); e.target.value = ''; };
 
-  // Swipe across the viewfinder to change look.
-  let sx = null, sy = null;
-  const frameEl = $('frame');
-  frameEl.addEventListener('pointerdown', (e) => { sx = e.clientX; sy = e.clientY; });
-  frameEl.addEventListener('pointerup', (e) => {
-    if (sx === null) return;
-    const dx = e.clientX - sx, dy = e.clientY - sy; sx = null;
-    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) stepFilm(dx < 0 ? 1 : -1);
-  });
+  bindViewfinderGestures();
 
   document.addEventListener('keydown', (e) => {
     if (e.target.closest('input, dialog')) return;
