@@ -10,7 +10,7 @@ struct AboutView: View {
                     Text("Every look is a 3D colour lookup table (33×33×33) applied on the GPU to each camera frame in real time, and again to the full-resolution photo when you press the shutter. Strength blends the look with the original; grain is added after the colour.")
                 }
                 Section("Camera looks") {
-                    Text("Provia, Velvia, Astia, Classic Chrome, Classic Neg., Nostalgic Neg., Reala Ace, Pro Neg., Eterna, Bleach Bypass and Acros are hand-tuned approximations built into this app from simple colour recipes (tone curve, per-hue saturation and hue shifts, split toning). They are not Fujifilm's own processing and won't match a camera exactly.")
+                    Text("Velvia, Astia, Classic Chrome, Classic Neg., Nostalgic Neg., Reala Ace, Pro Neg. Std/Hi, Eterna, Bleach Bypass and Acros are colour LUTs fitted for this app to Fujifilm's published sample photos, measuring how each simulation changes colour relative to Provia. Provia is a mild built-in recipe. They capture colour and tone only (no grain or sharpening), work best on well-exposed photos, and are approximations, not Fujifilm's own processing.")
                 }
                 Section("Film stocks") {
                     Text("Film-stock looks are adapted from the RawTherapee Film Simulation Collection (2015-09-20) by Pat David, Pavlov Dmitry and Michael Ezra, licensed CC BY-SA 4.0. Changes: the original sRGB Hald CLUTs were resampled with trilinear interpolation to 33³ samples and stored as 16-bit binaries. The adapted LUTs are shared under the same licence.")

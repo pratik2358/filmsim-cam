@@ -13,7 +13,7 @@ interpolation to 33x33x33 samples and written as raw little-endian UInt16 RGB
 CC BY-SA 4.0. They approximate film-stock colour only (no grain/halation).
 The trademarked names describe the intended look; no affiliation or endorsement.
 
-File -> original PNG (SHA-256 of the original):
+Film-stock file -> original PNG (SHA-256 of the original):
   acros-100.lut  753e0feea3cd4d7c03d96a083d0f05f42b95760a6b368e143f01d9e3e7e3edfb
   astia-100f.lut  8438929d2db9cdb173c5804b5a78a7da76b76a3b386f179de0e37659e6aecdd4
   fp-100c.lut  b7f7ec3d8dd8dd47f48d67061f56e65d174a26adaec1fb10b58c109cd76363c8
@@ -29,3 +29,8 @@ File -> original PNG (SHA-256 of the original):
   velvia-100.lut  4d8e7266229068a1ac4aadeebf1dcb28d7f5f2b385ba059f61c50f777325c7c0
   velvia-50.lut  e8e61b7550ca647aa11ca59544131522d3d249bc36bc282cacfe2a21aa2ae7ad
   xtra-800.lut  426ddecc1fe3e0efacdba84dd960059135748fa62c951e16fa9deac9ec6a836e
+
+Camera looks (cam-*.lut) are NOT from the RawTherapee collection. They were fitted by this
+project (tools/fit-camera-looks.py) to measure how each Fujifilm film simulation changes colour
+relative to PROVIA, using Fujifilm's publicly shown sample photos (same RAW rendered in each
+simulation). No images are included in this project. They are approximations, not Fujifilm data.

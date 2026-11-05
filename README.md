@@ -3,7 +3,9 @@
 iOS camera app that applies Fuji-style film looks **live in the viewfinder** and bakes them into the full-resolution photo.
 
 - Real-time GPU preview (Core Image on Metal, `CIColorCubeWithColorSpace`, 33³ LUTs)
-- 12 camera looks (Provia, Velvia, Astia, Classic Chrome, Classic Neg., Nostalgic Neg., Reala Ace, Pro Neg. Std/Hi, Eterna, Bleach Bypass, Acros): hand-tuned recipes in `Engine/LookRecipe.swift`
+- 12 camera looks (Provia, Velvia, Astia, Classic Chrome, Classic Neg., Nostalgic Neg., Reala Ace, Pro Neg. Std/Hi, Eterna, Bleach Bypass, Acros).
+  All but Provia are 3D LUTs fitted to Fujifilm's sample photos (`tools/fit-camera-looks.py`, `FujiFilmCam/LUTs/cam-*.lut`):
+  on scenes held out of the fit they average ΔE(OKLab×100) 0.77 from Fujifilm's output, vs 2.56 for the earlier hand-tuned recipes. Provia is a mild recipe (`Engine/LookRecipe.swift`).
 - 15 film stocks (Provia 100F, Velvia 50/100, Astia 100F, Sensia, Pro 160C/400H/800Z, Superia 200/400/Reala/X-Tra 800, FP-100C, Acros 100, Neopan 1600) from the RawTherapee collection (CC BY-SA 4.0, see `FujiFilmCam/LUTs/NOTICE.txt`)
 - Import your own `.cube` or Hald CLUT PNG (••• › Import LUT)
 - Strength slider, film grain, grid, flash, 0.5×/1×/2× lenses, tap to focus, swipe to change look

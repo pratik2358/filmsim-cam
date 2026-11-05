@@ -28,29 +28,26 @@ final class FilmLibrary {
     private(set) var films: [Film] = []
     private var cache: [String: LUT] = [:]
 
-    static let recipes: [String: LookRecipe] = [
-        "provia": .provia, "velvia": .velvia, "astia": .astia,
-        "classic-chrome": .classicChrome, "classic-neg": .classicNeg, "nostalgic-neg": .nostalgicNeg,
-        "reala-ace": .realaAce, "pro-neg-std": .proNegStd, "pro-neg-hi": .proNegHi,
-        "eterna": .eterna, "eterna-bleach": .eternaBleach, "acros": .acros,
-    ]
+    /// Looks generated from colour recipes. The other camera looks are LUTs fitted to
+    /// Fujifilm's published sample images (see tools/fit-camera-looks.py).
+    static let recipes: [String: LookRecipe] = ["provia": .provia]
 
     static let original = Film(id: "original", name: "Original", note: "No look applied", group: .camera, source: .none)
 
     private static let builtIn: [Film] = [
         original,
         Film(id: "provia", name: "Provia", note: "Standard, faithful colour", group: .camera, source: .recipe("provia")),
-        Film(id: "velvia", name: "Velvia", note: "Vivid, deep landscapes", group: .camera, source: .recipe("velvia")),
-        Film(id: "astia", name: "Astia", note: "Soft, flattering skin", group: .camera, source: .recipe("astia")),
-        Film(id: "classic-chrome", name: "Classic Chrome", note: "Muted documentary tones", group: .camera, source: .recipe("classic-chrome")),
-        Film(id: "classic-neg", name: "Classic Neg.", note: "Hard tone, cyan shadows", group: .camera, source: .recipe("classic-neg")),
-        Film(id: "nostalgic-neg", name: "Nostalgic Neg.", note: "Amber highlights, warm", group: .camera, source: .recipe("nostalgic-neg")),
-        Film(id: "reala-ace", name: "Reala Ace", note: "Natural, true-to-life", group: .camera, source: .recipe("reala-ace")),
-        Film(id: "pro-neg-std", name: "Pro Neg. Std", note: "Soft portrait tonality", group: .camera, source: .recipe("pro-neg-std")),
-        Film(id: "pro-neg-hi", name: "Pro Neg. Hi", note: "Punchier portraits", group: .camera, source: .recipe("pro-neg-hi")),
-        Film(id: "eterna", name: "Eterna", note: "Cinematic, understated", group: .camera, source: .recipe("eterna")),
-        Film(id: "eterna-bleach", name: "Bleach Bypass", note: "Desaturated, high contrast", group: .camera, source: .recipe("eterna-bleach")),
-        Film(id: "acros", name: "Acros", note: "Fine black & white", group: .camera, source: .recipe("acros"), isMono: true),
+        Film(id: "velvia", name: "Velvia", note: "Vivid, deep landscapes", group: .camera, source: .bundled("cam-velvia")),
+        Film(id: "astia", name: "Astia", note: "Soft, flattering skin", group: .camera, source: .bundled("cam-astia")),
+        Film(id: "classic-chrome", name: "Classic Chrome", note: "Muted documentary tones", group: .camera, source: .bundled("cam-classic-chrome")),
+        Film(id: "classic-neg", name: "Classic Neg.", note: "Hard tone, cyan shadows", group: .camera, source: .bundled("cam-classic-neg")),
+        Film(id: "nostalgic-neg", name: "Nostalgic Neg.", note: "Amber highlights, warm", group: .camera, source: .bundled("cam-nostalgic-neg")),
+        Film(id: "reala-ace", name: "Reala Ace", note: "Natural, true-to-life", group: .camera, source: .bundled("cam-reala-ace")),
+        Film(id: "pro-neg-std", name: "Pro Neg. Std", note: "Soft portrait tonality", group: .camera, source: .bundled("cam-pro-neg-std")),
+        Film(id: "pro-neg-hi", name: "Pro Neg. Hi", note: "Punchier portraits", group: .camera, source: .bundled("cam-pro-neg-hi")),
+        Film(id: "eterna", name: "Eterna", note: "Cinematic, understated", group: .camera, source: .bundled("cam-eterna")),
+        Film(id: "eterna-bleach", name: "Bleach Bypass", note: "Desaturated, high contrast", group: .camera, source: .bundled("cam-eterna-bleach")),
+        Film(id: "acros", name: "Acros", note: "Fine black & white", group: .camera, source: .bundled("cam-acros"), isMono: true),
 
         Film(id: "s-provia-100f", name: "Provia 100F", note: "Slide film", group: .stock, source: .bundled("provia-100f")),
         Film(id: "s-velvia-50", name: "Velvia 50", note: "Slide film", group: .stock, source: .bundled("velvia-50")),
