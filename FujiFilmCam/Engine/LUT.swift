@@ -86,27 +86,6 @@ extension LUT {
         if newSize == size { return self }
         return LUT.generate(size: newSize) { sample($0) }
     }
-
-    /// Core Image cube data (RGBA float32), with `intensity` blended toward identity.
-    func colorCubeData(intensity: Float) -> Data {
-        let n = size * size * size
-        var rgba = [Float](repeating: 1, count: n * 4)
-        let t = max(0, min(1, intensity))
-        let scale = 1 / Float(size - 1)
-        var src = 0, dst = 0
-        for b in 0..<size {
-            for g in 0..<size {
-                for r in 0..<size {
-                    let id = SIMD3(Float(r) * scale, Float(g) * scale, Float(b) * scale)
-                    let lut = SIMD3(values[src], values[src + 1], values[src + 2])
-                    let o = id + (lut - id) * t
-                    rgba[dst] = o.x; rgba[dst + 1] = o.y; rgba[dst + 2] = o.z
-                    src += 3; dst += 4
-                }
-            }
-        }
-        return rgba.withUnsafeBufferPointer { Data(buffer: $0) }
-    }
 }
 
 // MARK: - Importers (.cube text and Hald CLUT images)

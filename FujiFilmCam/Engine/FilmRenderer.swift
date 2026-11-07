@@ -16,6 +16,9 @@ final class FilmRenderer: @unchecked Sendable {
         var version = 0
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
+    /// Cubes are built off the main thread; only the newest request is kept (slider drags send many).
+    private let bakeQueue = DispatchQueue(label: "FilmRenderer.bake", qos: .userInitiated)
+    private let latestRequest = OSAllocatedUnfairLock(initialState: 0)
     private let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
     private let noise = CIFilter(name: "CIRandomGenerator")!.outputImage!
 
@@ -28,20 +31,28 @@ final class FilmRenderer: @unchecked Sendable {
     /// Bumped whenever settings change, so a still-image preview knows to redraw.
     var version: Int { state.withLock { $0.version } }
 
-    func configure(lut: LUT?, intensity: Float, grain: Float) {
-        var cube: CIFilter?
-        if let lut, intensity > 0.001 {
-            let f = CIFilter(name: "CIColorCubeWithColorSpace")!
-            f.setValue(lut.size, forKey: "inputCubeDimension")
-            f.setValue(lut.colorCubeData(intensity: intensity), forKey: "inputCubeData")
-            f.setValue(srgb, forKey: "inputColorSpace")
-            cube = f
-        }
-        let newCube = cube
-        state.withLock {
-            $0.cube = newCube
-            $0.grain = grain
-            $0.version += 1
+    /// The look, its strength and the picture settings are baked into one colour cube,
+    /// so the preview and the saved photo always match and extra settings cost nothing per frame.
+    func configure(lut: LUT?, intensity: Float, grain: Float, adjust: Adjustments = .neutral) {
+        let request = latestRequest.withLock { $0 += 1; return $0 }
+        bakeQueue.async { [self] in
+            guard latestRequest.withLock({ $0 }) == request else { return }   // superseded by a newer change
+            var cube: CIFilter?
+            let look = intensity > 0.001 ? lut : nil
+            if look != nil || !adjust.isNeutral {
+                let size = 33
+                let f = CIFilter(name: "CIColorCubeWithColorSpace")!
+                f.setValue(size, forKey: "inputCubeDimension")
+                f.setValue(adjust.cubeData(look: look, intensity: intensity, size: size), forKey: "inputCubeData")
+                f.setValue(srgb, forKey: "inputColorSpace")
+                cube = f
+            }
+            let newCube = cube
+            state.withLock {
+                $0.cube = newCube
+                $0.grain = grain
+                $0.version += 1
+            }
         }
     }
 

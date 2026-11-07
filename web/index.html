@@ -82,8 +82,20 @@
         </label>
         <div id="strip" class="strip" role="listbox" aria-label="Looks"></div>
       </div>
+      <div id="adjust-panel" class="adjust-panel" hidden>
+        <div class="adj-head"><span>Picture settings</span><button id="adj-reset" class="link-btn">Reset</button></div>
+        <label class="adj"><span>Highlight</span><input type="range" data-k="highlight" min="-2" max="4" step="0.5"><output></output></label>
+        <label class="adj"><span>Shadow</span><input type="range" data-k="shadow" min="-2" max="4" step="0.5"><output></output></label>
+        <label class="adj"><span>Temperature</span><input type="range" data-k="kelvin" min="2500" max="10000" step="100"><output></output></label>
+        <label class="adj"><span>WB shift Red</span><input type="range" data-k="wbRed" min="-9" max="9" step="1"><output></output></label>
+        <label class="adj"><span>WB shift Blue</span><input type="range" data-k="wbBlue" min="-9" max="9" step="1"><output></output></label>
+        <div class="adj"><span>Color Chrome</span><div class="seg" role="radiogroup" data-k="chrome"><button data-v="0" role="radio">Off</button><button data-v="1" role="radio">Weak</button><button data-v="2" role="radio">Strong</button></div></div>
+        <div class="adj"><span>FX Blue</span><div class="seg" role="radiogroup" data-k="chromeBlue"><button data-v="0" role="radio">Off</button><button data-v="1" role="radio">Weak</button><button data-v="2" role="radio">Strong</button></div></div>
+      </div>
       <div class="chip-row" id="chip-row">
         <button id="btn-look" class="look-chip" aria-expanded="false"><span id="look-name"></span>
+          <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
+        <button id="btn-adjust" class="look-chip" aria-expanded="false"><span>Adjust</span><i id="adjust-dot" class="dot" hidden></i>
           <svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
       </div>
       <div class="bottom">

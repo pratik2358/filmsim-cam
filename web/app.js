@@ -1,6 +1,8 @@
 // FilmCam for the web: live camera with film looks applied on the GPU (WebGL2 + 3D LUTs).
 // Everything runs locally; nothing is uploaded.
 
+import { ADJUST_DEFAULTS, isDefaultAdjust, bakeLUT } from './adjust.js';
+
 const LUT_SIZE = 33;
 
 const FILMS = [
@@ -50,7 +52,8 @@ const state = {
   intensity: store.get('intensity', 1),
   grain: store.get('grain', 0),
   grid: store.get('grid', false),
-  ratio: store.get('ratio', 'full'),   // 'full' = fill the screen (crops the edges) | 'fit' = the camera's whole frame
+  ratio: store.get('ratio', 'full'),
+  adjust: { ...ADJUST_DEFAULTS, ...store.get('adjust', {}) },   // tone, white balance, Color Chrome   // 'full' = fill the screen (crops the edges) | 'fit' = the camera's whole frame
   crop: { x: 0, y: 0, w: 1, h: 1 },   // part of the source that's visible (and saved)
   facing: store.get('facing', 'environment'),
   mode: 'camera',          // 'camera' | 'still'
@@ -115,8 +118,7 @@ void main() {
   outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }`;
 
-let prog, loc, imageTex, lutTex, maxTex = 4096;
-const lutTextures = new Map();
+let prog, loc, imageTex, maxTex = 4096;
 
 function initGL() {
   if (!gl) return false;
@@ -151,21 +153,30 @@ function initGL() {
   return true;
 }
 
-function lutTexture(id) {
-  if (lutTextures.has(id)) return lutTextures.get(id);
-  const data = lutData.get(id);
-  if (!data) return null;
-  const t = gl.createTexture();
-  gl.activeTexture(gl.TEXTURE1);
-  gl.bindTexture(gl.TEXTURE_3D, t);
-  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, LUT_SIZE, LUT_SIZE, LUT_SIZE, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
-  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
-    [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
-    gl.texParameteri(gl.TEXTURE_3D, k, v);
-  gl.activeTexture(gl.TEXTURE0);
-  lutTextures.set(id, t);
-  return t;
+/** The look, its strength and the picture settings baked into one 3D LUT (rebuilt only when they change). */
+let bakedTex = null, bakedKey = '';
+function currentLutTexture() {
+  const look = state.filmId === 'original' ? null : lutData.get(state.filmId);
+  if (!look && isDefaultAdjust(state.adjust)) return null;
+  const key = `${look ? state.filmId : '-'}|${state.intensity}|${JSON.stringify(state.adjust)}`;
+  if (key !== bakedKey) {
+    const data = bakeLUT(LUT_SIZE, look ? (c) => sampleLUT(look, c) : null, state.intensity, state.adjust);
+    if (!bakedTex) {
+      bakedTex = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_3D, bakedTex);
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+        [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE]])
+        gl.texParameteri(gl.TEXTURE_3D, k, v);
+    }
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_3D, bakedTex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB8, LUT_SIZE, LUT_SIZE, LUT_SIZE, 0, gl.RGB, gl.UNSIGNED_BYTE, data);
+    gl.activeTexture(gl.TEXTURE0);
+    bakedKey = key;
+  }
+  return bakedTex;
 }
 
 /** Draws the `crop` part of `source` (video / image) with the current look into a w×h canvas. */
@@ -176,12 +187,12 @@ function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL
   gl.bindTexture(gl.TEXTURE_2D, imageTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-  const tex = state.filmId === 'original' ? null : lutTexture(state.filmId);
+  const tex = currentLutTexture();
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_3D, tex);
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform1i(loc.uHasLut, tex ? 1 : 0);
-  gl.uniform1f(loc.uIntensity, state.intensity);
+  gl.uniform1f(loc.uIntensity, 1);   // strength is baked into the LUT
   gl.uniform1f(loc.uGrain, GRAIN[state.grain]);
   gl.uniform1f(loc.uGrainScale, Math.max(1, Math.min(w, h) / 1080));
   gl.uniform1f(loc.uSeed, animateGrain ? Math.random() * 1000 : 0);
@@ -753,7 +764,7 @@ function removeCustom(id) {
   store.set('customLUTs', custom);
   try { localStorage.removeItem('lut:' + id); } catch {}
   lutData.delete(id);
-  const t = lutTextures.get(id); if (t) { gl.deleteTexture(t); lutTextures.delete(id); }
+  bakedKey = '';
   if (state.filmId === id) selectFilm('original');
   buildStrip();
 }
@@ -837,6 +848,7 @@ function updateUI() {
   $('btn-grain').classList.toggle('on', state.grain > 0);
   $('btn-grid').classList.toggle('on', state.grid);
   $('look-name').textContent = filmById(state.filmId)?.name || 'Original';
+  drawAdjust();
   $('btn-ratio').disabled = still;
   $('btn-ratio').setAttribute('aria-label', `Frame size: ${state.ratio === 'full' ? 'full screen' : 'whole camera frame'}`);
   lastLayout = ''; state.dirty = true;
@@ -855,6 +867,21 @@ function updateUI() {
   drawLenses();
 }
 
+const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + String(Math.abs(v));
+function drawAdjust() {
+  const a = state.adjust;
+  for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) {
+    const k = input.dataset.k, v = a[k];
+    input.value = v;
+    const out = input.nextElementSibling;
+    out.textContent = k === 'kelvin' ? (v === 5500 ? 'As shot' : `${v}K`) : signed(v);
+    out.classList.toggle('changed', v !== ADJUST_DEFAULTS[k]);
+  }
+  for (const seg of $('adjust-panel').querySelectorAll('.seg'))
+    for (const b of seg.children) b.setAttribute('aria-checked', String(Number(b.dataset.v) === a[seg.dataset.k]));
+  $('adjust-dot').hidden = isDefaultAdjust(a);
+}
+
 function showStatus(title, detail) {
   $('status-title').textContent = title; $('status-detail').textContent = detail; $('status').hidden = false;
 }
@@ -866,11 +893,16 @@ function toast(msg, ms = 2600) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
-function setPanel(open) {
-  $('look-panel').hidden = !open;
-  $('controls').classList.toggle('open', open);
-  $('btn-look').setAttribute('aria-expanded', String(open));
-  if (open) scrollToSelected(false);
+/** Opens one of the panels above the shutter ('look' | 'adjust'), or closes them (null). */
+let openPanel = null;
+function setPanel(name) {
+  openPanel = name;
+  $('look-panel').hidden = name !== 'look';
+  $('adjust-panel').hidden = name !== 'adjust';
+  $('controls').classList.toggle('open', !!name);
+  $('btn-look').setAttribute('aria-expanded', String(name === 'look'));
+  $('btn-adjust').setAttribute('aria-expanded', String(name === 'adjust'));
+  if (name === 'look') scrollToSelected(false);
 }
 function setMenu(open) {
   $('menu').hidden = !open;
@@ -878,13 +910,18 @@ function setMenu(open) {
 }
 /** Closes the look panel and the menu; true if anything was open. */
 function closePanels() {
-  const was = !$('look-panel').hidden || !$('menu').hidden;
-  setPanel(false); setMenu(false);
+  const was = !!openPanel || !$('menu').hidden;
+  setPanel(null); setMenu(false);
   return was;
 }
 
 function bindUI() {
-  $('btn-look').onclick = () => { setMenu(false); setPanel($('look-panel').hidden); };
+  $('btn-look').onclick = () => { setMenu(false); setPanel(openPanel === 'look' ? null : 'look'); };
+  $('btn-adjust').onclick = () => { setMenu(false); setPanel(openPanel === 'adjust' ? null : 'adjust'); };
+  const setAdjust = (k, v) => { state.adjust[k] = v; store.set('adjust', state.adjust); state.dirty = true; updateUI(); };
+  for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) input.oninput = () => setAdjust(input.dataset.k, Number(input.value));
+  for (const seg of $('adjust-panel').querySelectorAll('.seg')) seg.onclick = (e) => { const b = e.target.closest('button'); if (b) setAdjust(seg.dataset.k, Number(b.dataset.v)); };
+  $('adj-reset').onclick = () => { state.adjust = { ...ADJUST_DEFAULTS }; store.set('adjust', state.adjust); state.dirty = true; updateUI(); };
   $('btn-more').onclick = (e) => { e.stopPropagation(); setMenu($('menu').hidden); };
   document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu, #btn-more')) setMenu(false); });
   $('menu').addEventListener('click', (e) => { if (e.target.closest('#btn-import, #btn-about')) setMenu(false); });

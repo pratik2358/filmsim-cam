@@ -97,7 +97,22 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .controls > * { pointer-events: auto; }
 .controls > .chip-row { pointer-events: none; }
 .look-panel { display: flex; flex-direction: column; gap: 12px; }
-.chip-row { display: flex; justify-content: center; }
+.chip-row { display: flex; justify-content: center; gap: 8px; }
+.look-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+
+/* Picture settings (tone, white balance, Color Chrome) */
+.adjust-panel { display: flex; flex-direction: column; gap: 6px; padding: 0 20px; }
+.adj-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.link-btn { color: var(--accent); font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: 0; padding: 4px 0; }
+.adj { display: flex; align-items: center; gap: 12px; min-height: 32px; font-size: 13px; }
+.adj > span { width: 96px; flex: none; color: var(--muted); }
+.adj input { flex: 1; min-width: 0; accent-color: var(--accent); }
+.adj output { width: 52px; flex: none; text-align: right; font-variant-numeric: tabular-nums; }
+.adj output.changed { color: var(--accent); }
+.seg { flex: 1; display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { flex: 1; padding: 6px 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-checked="true"] { background: rgba(245, 200, 60, .18); color: var(--accent); }
 .look-chip {
   pointer-events: auto; display: flex; align-items: center; gap: 5px; max-width: 70vw;
   padding: 6px 12px; border-radius: 999px; background: rgba(0,0,0,.45);

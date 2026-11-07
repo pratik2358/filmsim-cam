@@ -13,6 +13,18 @@ struct CameraScreen: View {
     @AppStorage("portrait") private var wantPortrait = false
     @AppStorage("aperture") private var aperture = 2.8
     @AppStorage("frameRatio") private var frameRatio = FrameRatio.full
+    // Picture settings (see Adjustments): tone, white balance, Color Chrome.
+    @AppStorage("adj.highlight") private var adjHighlight = 0.0
+    @AppStorage("adj.shadow") private var adjShadow = 0.0
+    @AppStorage("adj.kelvin") private var adjKelvin = 5500.0
+    @AppStorage("adj.wbRed") private var adjWBRed = 0.0
+    @AppStorage("adj.wbBlue") private var adjWBBlue = 0.0
+    @AppStorage("adj.chrome") private var adjChrome = 0
+    @AppStorage("adj.chromeBlue") private var adjChromeBlue = 0
+    private var adjustments: Adjustments {
+        Adjustments(highlight: adjHighlight, shadow: adjShadow, kelvin: adjKelvin, wbRed: adjWBRed, wbBlue: adjWBBlue,
+                    chrome: adjChrome, chromeBlue: adjChromeBlue)
+    }
 
     @State private var touch: Touch?
     @State private var holdTask: Task<Void, Never>?
@@ -66,6 +78,7 @@ struct CameraScreen: View {
                let image = CIImage(contentsOf: URL(fileURLWithPath: path), options: [.applyOrientationProperty: true]) {
                 camera.showStill(image)
             }
+            if UserDefaults.standard.string(forKey: "openPanel") == "adjust" { panel = .adjust }   // `-openPanel adjust`
             #endif
             camera.setAperture(Float(aperture))
             await camera.start()
@@ -75,6 +88,7 @@ struct CameraScreen: View {
         .onChange(of: filmID) { applyLook(); flashBadge() }
         .onChange(of: intensity) { applyLook() }
         .onChange(of: grain) { applyLook() }
+        .onChange(of: adjustments) { applyLook() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await camera.start() } } else if phase == .background { camera.stop() }
         }
@@ -257,7 +271,7 @@ struct CameraScreen: View {
     // MARK: Controls
 
     /// Panels that open above the shutter; closed by default so the viewfinder stays clear.
-    enum Panel { case looks, depth }
+    enum Panel { case looks, adjust, depth }
 
     private var controls: some View {
         let showDepth = camera.isPortrait && !camera.isShowingStill
@@ -281,6 +295,9 @@ struct CameraScreen: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            if panel == .adjust {
+                adjustPanel.transition(.move(edge: .bottom).combined(with: .opacity))
+            }
             if panel == .depth && showDepth {
                 HStack(spacing: 12) {
                     Text("Depth").font(.caption).foregroundStyle(.secondary)
@@ -299,6 +316,8 @@ struct CameraScreen: View {
             HStack(spacing: 8) {
                 PanelChip(title: film.name, open: panel == .looks) { toggle(.looks) }
                     .accessibilityLabel("Look: \(film.name). Show looks")
+                PanelChip(title: "Adjust", open: panel == .adjust, marked: !adjustments.isNeutral) { toggle(.adjust) }
+                    .accessibilityLabel(adjustments.isNeutral ? "Picture settings" : "Picture settings, changed")
                 if showDepth {
                     PanelChip(title: String(format: "f/%.1f", aperture), open: panel == .depth) { toggle(.depth) }
                         .accessibilityLabel("Background blur f/\(String(format: "%.1f", aperture))")
@@ -340,6 +359,35 @@ struct CameraScreen: View {
         .padding(.top, 10)
         .padding(.bottom, 8)
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Fujifilm-style picture settings: tone curve, white balance and Color Chrome.
+    private var adjustPanel: some View {
+        let signed: (Double) -> String = { v in
+            let s = v == v.rounded() ? String(Int(abs(v))) : String(format: "%.1f", abs(v))
+            return (v > 0 ? "+" : v < 0 ? "−" : "") + s
+        }
+        return VStack(spacing: 6) {
+            HStack {
+                Text("PICTURE SETTINGS").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset") {
+                    adjHighlight = 0; adjShadow = 0; adjKelvin = 5500; adjWBRed = 0; adjWBBlue = 0; adjChrome = 0; adjChromeBlue = 0
+                }
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.yellow)
+                .disabled(adjustments.isNeutral)
+            }
+            AdjustRow(label: "Highlight", value: $adjHighlight, range: -2...4, step: 0.5, neutral: 0, text: signed)
+            AdjustRow(label: "Shadow", value: $adjShadow, range: -2...4, step: 0.5, neutral: 0, text: signed)
+            AdjustRow(label: "Temperature", value: $adjKelvin, range: 2500...10000, step: 100, neutral: 5500) {
+                $0 == 5500 ? "As shot" : "\(Int($0))K"
+            }
+            AdjustRow(label: "WB shift Red", value: $adjWBRed, range: -9...9, step: 1, neutral: 0, text: signed)
+            AdjustRow(label: "WB shift Blue", value: $adjWBBlue, range: -9...9, step: 1, neutral: 0, text: signed)
+            ChoiceRow(label: "Color Chrome", selection: $adjChrome)
+            ChoiceRow(label: "FX Blue", selection: $adjChromeBlue)
+        }
+        .padding(.horizontal, 20)
     }
 
     private func toggle(_ p: Panel) {
@@ -418,7 +466,7 @@ struct CameraScreen: View {
 
     private func applyLook() {
         let lut = library.lut(for: film)
-        FilmRenderer.shared.configure(lut: lut, intensity: Float(intensity), grain: [0, 0.5, 1][grain])
+        FilmRenderer.shared.configure(lut: lut, intensity: Float(intensity), grain: [0, 0.5, 1][grain], adjust: adjustments)
     }
 
     private func flashBadge() {
@@ -569,16 +617,53 @@ private struct StatusCard<Actions: View>: View {
 private struct PanelChip: View {
     let title: String
     let open: Bool
+    var marked = false      // shows a dot (e.g. picture settings changed)
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Text(title).font(.caption.weight(.semibold)).lineLimit(1)
+                if marked { Circle().fill(.yellow).frame(width: 5, height: 5) }
                 Image(systemName: open ? "chevron.down" : "chevron.up").font(.system(size: 9, weight: .bold))
             }
             .foregroundStyle(open ? .yellow : .white)
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(.black.opacity(0.45), in: Capsule())
+        }
+    }
+}
+
+/// A labelled slider with its value; the value turns yellow when changed from neutral.
+private struct AdjustRow: View {
+    let label: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let neutral: Double
+    let text: (Double) -> String
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
+            Slider(value: $value, in: range, step: step).tint(.yellow)
+            Text(text(value)).font(.caption.monospacedDigit())
+                .foregroundStyle(value == neutral ? .white : .yellow)
+                .frame(width: 52, alignment: .trailing)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// Off / Weak / Strong, like Fujifilm's Color Chrome menus.
+private struct ChoiceRow: View {
+    let label: String
+    @Binding var selection: Int
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
+            Picker(label, selection: $selection) {
+                Text("Off").tag(0); Text("Weak").tag(1); Text("Strong").tag(2)
+            }
+            .pickerStyle(.segmented)
         }
     }
 }
