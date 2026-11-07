@@ -1,5 +1,7 @@
 # FilmCam (FujiFilmCam)
 
+Also available as a native **Android app** (`android/`, see [android/README.md](android/README.md)) and a **website** (`web/`).
+
 iOS camera app that applies Fuji-style film looks **live in the viewfinder** and bakes them into the full-resolution photo.
 
 - Real-time GPU preview (Core Image on Metal, `CIColorCubeWithColorSpace`, 33³ LUTs)
