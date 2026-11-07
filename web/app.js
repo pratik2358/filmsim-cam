@@ -90,7 +90,17 @@ float valueNoise(vec2 p) {
 }
 void main() {
   vec3 c = texture(uImage, vUv).rgb;
-  if (uGain != 1.0) c = toSrgb(clamp(toLin(c) * uGain, 0.0, 1.0));
+  if (uGain != 1.0) {
+    vec3 l = toLin(c) * uGain;
+    if (uGain > 1.0) {
+      // Highlight shoulder: brightening rolls bright areas off smoothly towards white instead of
+      // clipping them. Applied to the brightest channel so colours keep their hue.
+      const float K = 0.55;
+      float m = max(max(l.r, l.g), l.b);
+      if (m > K) l *= (K + (1.0 - K) * (1.0 - exp(-(m - K) / (1.0 - K)))) / m;
+    }
+    c = toSrgb(clamp(l, 0.0, 1.0));
+  }
   if (uHasLut) {
     const float N = ${LUT_SIZE}.0;
     vec3 l = texture(uLut, clamp(c, 0.0, 1.0) * ((N - 1.0) / N) + 0.5 / N).rgb;
@@ -383,7 +393,17 @@ function spotMeterEV(x, y) {
   const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
   for (let i = 0; i < d.length; i += 4) { sum += 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]); n++; }
   const y0 = Math.max(1e-4, sum / Math.max(1, n));
-  return Math.max(-EV_RANGE, Math.min(EV_RANGE, Math.log2(0.18 / y0)));
+  let ev = Math.log2(0.18 / y0);
+  if (ev > 0) {
+    // Don't brighten past what the rest of the frame can take: keep the bright end of the picture
+    // (98th percentile) within about a stop of white, where the highlight shoulder still holds detail.
+    const all = ctx.getImageData(0, 0, w, h).data, ys = new Float32Array(all.length / 4);
+    for (let i = 0, j = 0; i < all.length; i += 4, j++) ys[j] = 0.2126 * lin(all[i]) + 0.7152 * lin(all[i + 1]) + 0.0722 * lin(all[i + 2]);
+    ys.sort();
+    const hi = Math.max(1e-3, ys[Math.floor(ys.length * 0.98)]);
+    ev = Math.min(ev, Math.max(0, Math.log2(2.0 / hi)), 1.5);
+  }
+  return Math.max(-EV_RANGE, Math.min(EV_RANGE, ev));
 }
 
 let evTimer;
