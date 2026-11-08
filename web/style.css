@@ -102,7 +102,13 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 
 /* Picture settings (tone, white balance, Color Chrome) */
 .adjust-panel { display: flex; flex-direction: column; gap: 6px; padding: 0 20px; }
-.adj-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.adj-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; }
+.adj-tabs { display: flex; gap: 4px; }
+.adj-tabs button { display: flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.adj-tabs button[aria-selected="true"] { color: var(--accent); background: rgba(245, 200, 60, .18); }
+.adj-tabs .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.adj-page { display: flex; flex-direction: column; gap: 6px; }
+.adj-page[hidden] { display: none; }
 .link-btn { color: var(--accent); font-size: 13px; font-weight: 600; text-transform: none; letter-spacing: 0; padding: 4px 0; }
 .adj { display: flex; align-items: center; gap: 12px; min-height: 32px; font-size: 13px; }
 .adj > span { width: 96px; flex: none; color: var(--muted); }

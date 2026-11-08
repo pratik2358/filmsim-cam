@@ -24,6 +24,7 @@ struct CameraScreen: View {
     @AppStorage("adj.color") private var adjColor = 0.0
     @AppStorage("adj.sharpness") private var adjSharpness = 0.0
     @AppStorage("adj.clarity") private var adjClarity = 0.0
+    @AppStorage("adjustTab") private var adjustTab = 0   // 0 Tone, 1 Color
     private var adjustments: Adjustments {
         Adjustments(highlight: adjHighlight, shadow: adjShadow, kelvin: adjKelvin, wbRed: adjWBRed, wbBlue: adjWBBlue,
                     chrome: adjChrome, chromeBlue: adjChromeBlue, color: Int(adjColor),
@@ -372,8 +373,9 @@ struct CameraScreen: View {
             return (v > 0 ? "+" : v < 0 ? "−" : "") + s
         }
         return VStack(spacing: 6) {
-            HStack {
-                Text("PICTURE SETTINGS").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                adjustTabButton("Tone", tab: 0, changed: adjHighlight != 0 || adjShadow != 0 || adjClarity != 0 || adjSharpness != 0)
+                adjustTabButton("Color", tab: 1, changed: adjColor != 0 || adjKelvin != 5500 || adjWBRed != 0 || adjWBBlue != 0 || adjChrome != 0 || adjChromeBlue != 0)
                 Spacer()
                 Button("Reset") {
                     adjHighlight = 0; adjShadow = 0; adjKelvin = 5500; adjWBRed = 0; adjWBBlue = 0; adjChrome = 0; adjChromeBlue = 0
@@ -382,20 +384,37 @@ struct CameraScreen: View {
                 .font(.subheadline.weight(.semibold)).foregroundStyle(.yellow)
                 .disabled(adjustments.isNeutral)
             }
-            AdjustRow(label: "Highlight", value: $adjHighlight, range: -2...4, step: 0.5, neutral: 0, text: signed)
-            AdjustRow(label: "Shadow", value: $adjShadow, range: -2...4, step: 0.5, neutral: 0, text: signed)
-            AdjustRow(label: "Color", value: $adjColor, range: -4...4, step: 1, neutral: 0, text: signed)
-            AdjustRow(label: "Sharpness", value: $adjSharpness, range: -4...4, step: 1, neutral: 0, text: signed)
-            AdjustRow(label: "Clarity", value: $adjClarity, range: -5...5, step: 1, neutral: 0, text: signed)
-            AdjustRow(label: "Temperature", value: $adjKelvin, range: 2500...10000, step: 100, neutral: 5500) {
-                $0 == 5500 ? "As shot" : "\(Int($0))K"
+            if adjustTab == 0 {
+                AdjustRow(label: "Highlight", value: $adjHighlight, range: -2...4, step: 0.5, neutral: 0, text: signed)
+                AdjustRow(label: "Shadow", value: $adjShadow, range: -2...4, step: 0.5, neutral: 0, text: signed)
+                AdjustRow(label: "Clarity", value: $adjClarity, range: -5...5, step: 1, neutral: 0, text: signed)
+                AdjustRow(label: "Sharpness", value: $adjSharpness, range: -4...4, step: 1, neutral: 0, text: signed)
+            } else {
+                AdjustRow(label: "Color", value: $adjColor, range: -4...4, step: 1, neutral: 0, text: signed)
+                AdjustRow(label: "Temperature", value: $adjKelvin, range: 2500...10000, step: 100, neutral: 5500) {
+                    $0 == 5500 ? "As shot" : "\(Int($0))K"
+                }
+                AdjustRow(label: "WB shift Red", value: $adjWBRed, range: -9...9, step: 1, neutral: 0, text: signed)
+                AdjustRow(label: "WB shift Blue", value: $adjWBBlue, range: -9...9, step: 1, neutral: 0, text: signed)
+                ChoiceRow(label: "Color Chrome", selection: $adjChrome)
+                ChoiceRow(label: "FX Blue", selection: $adjChromeBlue)
             }
-            AdjustRow(label: "WB shift Red", value: $adjWBRed, range: -9...9, step: 1, neutral: 0, text: signed)
-            AdjustRow(label: "WB shift Blue", value: $adjWBBlue, range: -9...9, step: 1, neutral: 0, text: signed)
-            ChoiceRow(label: "Color Chrome", selection: $adjChrome)
-            ChoiceRow(label: "FX Blue", selection: $adjChromeBlue)
         }
         .padding(.horizontal, 20)
+    }
+
+    /// Tab in the Adjust panel; a dot marks a tab with changed settings.
+    private func adjustTabButton(_ title: String, tab: Int, changed: Bool) -> some View {
+        Button { adjustTab = tab } label: {
+            HStack(spacing: 5) {
+                Text(title).font(.subheadline.weight(.bold))
+                if changed { Circle().fill(.yellow).frame(width: 6, height: 6) }
+            }
+            .foregroundStyle(adjustTab == tab ? .yellow : .secondary)
+            .padding(.horizontal, 12).padding(.vertical, 5)
+            .background(adjustTab == tab ? Color.yellow.opacity(0.18) : .clear, in: Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private func toggle(_ p: Panel) {

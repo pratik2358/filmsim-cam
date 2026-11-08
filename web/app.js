@@ -1009,6 +1009,7 @@ function updateUI() {
 }
 
 const signed = (v) => (v > 0 ? '+' : v < 0 ? '−' : '') + String(Math.abs(v));
+let adjustTab = store.get('adjustTab', 'tone');
 function drawAdjust() {
   const a = state.adjust;
   for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) {
@@ -1021,6 +1022,14 @@ function drawAdjust() {
   for (const seg of $('adjust-panel').querySelectorAll('.seg'))
     for (const b of seg.children) b.setAttribute('aria-checked', String(Number(b.dataset.v) === a[seg.dataset.k]));
   $('adjust-dot').hidden = isDefaultAdjust(a);
+  // Two tabs; each shows a dot when something in it is changed.
+  for (const b of $('adjust-panel').querySelectorAll('.adj-tabs button')) {
+    const page = $('adjust-panel').querySelector(`.adj-page[data-page="${b.dataset.tab}"]`);
+    const on = b.dataset.tab === adjustTab;
+    b.setAttribute('aria-selected', String(on));
+    page.hidden = !on;
+    b.querySelector('.dot').hidden = ![...page.querySelectorAll('[data-k]')].some((el) => a[el.dataset.k] !== ADJUST_DEFAULTS[el.dataset.k]);
+  }
 }
 
 function showStatus(title, detail) {
@@ -1064,6 +1073,10 @@ function bindUI() {
   };
   for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) input.oninput = () => setAdjust(input.dataset.k, Number(input.value));
   for (const seg of $('adjust-panel').querySelectorAll('.seg')) seg.onclick = (e) => { const b = e.target.closest('button'); if (b) setAdjust(seg.dataset.k, Number(b.dataset.v)); };
+  $('adjust-panel').querySelector('.adj-tabs').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    adjustTab = b.dataset.tab; store.set('adjustTab', adjustTab); drawAdjust();
+  };
   $('adj-reset').onclick = () => {
     state.adjust = { ...ADJUST_DEFAULTS }; store.set('adjust', state.adjust); state.dirty = true; updateUI();
   };
