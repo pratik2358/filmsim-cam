@@ -14,7 +14,8 @@ const val LUT_SIZE = 33
 
 /**
  * Fujifilm-style picture settings, baked together with the film look into one colour cube.
- * Order follows the camera: white balance → film look (+ strength) → tone curve → Color Chrome.
+ * Order follows the camera: white balance → film look (+ strength) → tone curve → Color Chrome → Color.
+ * Sharpness and Clarity aren't colour mappings; FilmRenderer applies them in its shader.
  * Line-for-line port of web/adjust.js (and FujiFilmCam/Engine/Adjustments.swift); keep them in sync.
  */
 data class Adjustments(
@@ -25,8 +26,16 @@ data class Adjustments(
     val wbBlue: Double = 0.0,      // −9 … +9 white-balance shift (blue ↔ yellow)
     val chrome: Int = 0,           // Color Chrome Effect: 0 off, 1 weak, 2 strong
     val chromeBlue: Int = 0,       // Color Chrome FX Blue: 0 off, 1 weak, 2 strong
+    val color: Int = 0,            // −4 … +4 saturation (Fujifilm "Color")
+    val sharpness: Int = 0,        // −4 … +4
+    val clarity: Int = 0,          // −5 … +5 (midtone local contrast)
 ) {
     val isNeutral get() = this == NEUTRAL
+    /** True when the colour LUT is unaffected (only shader settings changed). */
+    val isNeutralLut get() = copy(sharpness = 0, clarity = 0) == NEUTRAL
+    /** Shader amounts (same as web/adjust.js): unsharp mask (+) or soften (−); midtone local contrast. */
+    val sharpAmount get() = (if (sharpness > 0) 0.25 * sharpness else 0.15 * sharpness).toFloat()
+    val clarityAmount get() = (0.12 * clarity).toFloat()
 
     /** Per-channel gains (linear light) for the white-balance settings, normalised to keep brightness. */
     fun wbGains(): DoubleArray {
@@ -86,6 +95,10 @@ data class Adjustments(
             for (i in 0..2) c[i] += (l[i] - c[i]) * intensity
         }
         tone(c); colorChrome(c)
+        if (color != 0) {   // Fujifilm "Color": saturation (+4 → ×1.3, −4 → ×0.7)
+            val y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; val k = 1 + 0.075 * color
+            for (i in 0..2) c[i] = y + (c[i] - y) * k
+        }
         for (i in 0..2) c[i] = clamp01(c[i])
     }
 

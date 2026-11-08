@@ -11,6 +11,8 @@ Same looks, picture settings and maths as the iPhone app and the website.
 - 3:4 / 9:16 / Full frame (photos are cropped to what the viewfinder shows), zoom stops (.5×/1×/2×/5× when the phone has them), flash, front/back camera
 - Portrait: blurs the background behind people, using ML Kit selfie segmentation on the phone (bundled, works offline). f/1.4–f/16.
   Works on the live camera and on photos opened from the gallery. Without a person in view it leaves the picture sharp.
+- Video: switch to VIDEO above the shutter. Records what the viewfinder shows with the look, grain and Portrait blur
+  (H.264 up to 1080 px wide + AAC sound) to `Movies/FilmCam`. The flash button becomes a light. Leaving the app stops and saves.
 - Photos save to `Pictures/FilmCam` (shows up in Google Photos / the gallery). Nothing is uploaded.
 
 Requires Android 10 or later on an ARM phone (practically every phone).

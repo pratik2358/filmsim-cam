@@ -39,6 +39,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge(SystemBarStyle.dark(0), SystemBarStyle.dark(0))
         glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(3)
+            setEGLConfigChooser(RecordableConfigChooser())   // so the same frames can go to the video encoder
             preserveEGLContextOnPause = true
         }
         renderer = FilmRenderer(glView)
@@ -70,6 +71,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        camera.stopRecording()   // leaving the app ends (and saves) a recording
         camera.stop()
         glView.onPause()
         super.onPause()

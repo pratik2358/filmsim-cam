@@ -11,6 +11,8 @@ class AdjustmentsTest {
         Adjustments(highlight = 4.0, shadow = -2.0),
         Adjustments(chrome = 2, chromeBlue = 2),
         Adjustments(highlight = 1.5, shadow = 2.0, kelvin = 4200.0, wbRed = 2.0, chrome = 1, chromeBlue = 1),
+        Adjustments(color = 4, chrome = 1),
+        Adjustments(color = -3, kelvin = 4200.0),
     )
     private val colors = listOf(
         doubleArrayOf(0.85, 0.15, 0.12), doubleArrayOf(0.30, 0.55, 0.90), doubleArrayOf(0.87, 0.67, 0.55),
@@ -46,7 +48,19 @@ class AdjustmentsTest {
         doubleArrayOf(0.845273, 0.703803, 0.679575),
         doubleArrayOf(0.462659, 0.497710, 0.585374),
         doubleArrayOf(0.052425, 0.161877, 0.028935),
-        doubleArrayOf(0.899523, 0.913139, 0.948496)
+        doubleArrayOf(0.899523, 0.913139, 0.948496),
+        doubleArrayOf(0.934723, 0.097523, 0.061643),
+        doubleArrayOf(0.218859, 0.523658, 0.950376),
+        doubleArrayOf(0.912445, 0.654536, 0.499791),
+        doubleArrayOf(0.500000, 0.500000, 0.500000),
+        doubleArrayOf(0.079014, 0.208012, 0.014514),
+        doubleArrayOf(0.963977, 0.898977, 0.768977),
+        doubleArrayOf(0.664877, 0.180783, 0.178995),
+        doubleArrayOf(0.328027, 0.546553, 0.893152),
+        doubleArrayOf(0.772172, 0.678701, 0.659840),
+        doubleArrayOf(0.464331, 0.501675, 0.570079),
+        doubleArrayOf(0.105259, 0.193544, 0.089702),
+        doubleArrayOf(0.874492, 0.903188, 0.930711),
     )
 
     @Test fun matchesWeb() {

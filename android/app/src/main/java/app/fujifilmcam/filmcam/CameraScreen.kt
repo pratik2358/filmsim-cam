@@ -1,8 +1,14 @@
 package app.fujifilmcam.filmcam
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.opengl.GLSurfaceView
+import android.os.SystemClock
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -51,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -61,6 +68,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 private val Accent = Color(0xFFF5C83C)
+private val RecordRed = Color(0xFFE5392F)
 private enum class Panel { Looks, Adjust, Depth }
 
 @Composable
@@ -151,6 +159,7 @@ fun CameraScreen(
                     panel = if (panel == Panel.Depth) null else Panel.Depth
                 }
             }
+            if (!still) ModeSwitch(camera)
             ShutterRow(camera, onPickPhoto)
         }
     }
@@ -277,19 +286,23 @@ private fun TopBar(model: AppModel, camera: CameraController, onImportLuts: () -
     val still = camera.showingStill
     Row(Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-        if (camera.hasFlash && !still) {
+        if (camera.hasFlash && !still && camera.videoMode) {
+            BarIcon(if (camera.torch) Icons.Filled.FlashlightOn else Icons.Filled.FlashlightOff, if (camera.torch) "Light on" else "Light off",
+                if (camera.torch) Accent else Color.White) { camera.toggleTorch() }
+        } else if (camera.hasFlash && !still) {
             val icon = when (camera.flash) { FlashSetting.Off -> Icons.Filled.FlashOff; FlashSetting.Auto -> Icons.Filled.FlashAuto; FlashSetting.On -> Icons.Filled.FlashOn }
             BarIcon(icon, "Flash ${camera.flash.name}", if (camera.flash == FlashSetting.Off) Color.White else Accent) { camera.cycleFlash() }
         }
+        val ratioLocked = still || camera.recording
         Text(
-            model.ratio.label, color = if (still) Color.Gray else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+            model.ratio.label, color = if (ratioLocked) Color.Gray else Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center,
-            modifier = Modifier.clip(RoundedCornerShape(5.dp)).border(1.5.dp, if (still) Color.Gray else Color.White, RoundedCornerShape(5.dp))
-                .clickable(enabled = !still) { model.updateRatio(model.ratio.next) }.widthIn(min = 40.dp).padding(horizontal = 6.dp, vertical = 3.dp),
+            modifier = Modifier.clip(RoundedCornerShape(5.dp)).border(1.5.dp, if (ratioLocked) Color.Gray else Color.White, RoundedCornerShape(5.dp))
+                .clickable(enabled = !ratioLocked) { model.updateRatio(model.ratio.next) }.widthIn(min = 40.dp).padding(horizontal = 6.dp, vertical = 3.dp),
         )
         if (!still && camera.status == CameraStatus.Running) {
             val on = camera.portrait
-            Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable {
+            Row(Modifier.clip(RoundedCornerShape(8.dp)).alpha(if (camera.recording) 0.4f else 1f).clickable(enabled = !camera.recording) {
                 model.updatePortrait(!on); camera.enablePortrait(!on)
             }.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Filled.Portrait, null, tint = if (on) Accent else Color.White, modifier = Modifier.size(20.dp))
@@ -325,6 +338,7 @@ private fun Hud(model: AppModel, camera: CameraController) {
         badge = true; delay(1400); badge = false
     }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (camera.recording) RecordingTimer(camera.recordStartedAt)
         if (camera.focusLocked && !camera.showingStill) {
             Text("AE/AF LOCK", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 8.dp).background(Color(0xFFFFD60A), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 3.dp))
@@ -339,6 +353,39 @@ private fun Hud(model: AppModel, camera: CameraController) {
                 Text(model.film.name, color = Color.White, fontWeight = FontWeight.SemiBold)
                 Text(model.film.note, color = Color.Gray, fontSize = 12.sp)
             }
+        }
+    }
+}
+
+@Composable
+private fun RecordingTimer(startedAt: Long) {
+    var secs by remember { mutableIntStateOf(0) }
+    LaunchedEffect(startedAt) { while (true) { secs = ((SystemClock.elapsedRealtime() - startedAt) / 1000).toInt(); delay(250) } }
+    Row(Modifier.padding(top = 8.dp).background(RecordRed, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(7.dp).background(Color.White, CircleShape))
+        Text("  %d:%02d".format(secs / 60, secs % 60), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** PHOTO · VIDEO, above the shutter. Asks for the microphone the first time Video is chosen. */
+@Composable
+private fun ModeSwitch(camera: CameraController) {
+    val context = LocalContext.current
+    val askMic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (!granted) Toast.makeText(context, "Videos will be recorded without sound.", Toast.LENGTH_LONG).show()
+    }
+    val locked = camera.recording || camera.savingVideo
+    Row(Modifier.padding(top = 10.dp).alpha(if (locked) 0.4f else 1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        for ((label, video) in listOf("PHOTO" to false, "VIDEO" to true)) {
+            val sel = camera.videoMode == video
+            Text(label, color = if (sel) Accent else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(if (sel) Color.Black.copy(alpha = 0.45f) else Color.Transparent)
+                    .clickable(enabled = !locked) {
+                        camera.updateVideoMode(video)
+                        if (video && ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                            askMic.launch(Manifest.permission.RECORD_AUDIO)
+                    }.padding(horizontal = 12.dp, vertical = 5.dp))
         }
     }
 }
@@ -367,24 +414,39 @@ private fun ShutterRow(camera: CameraController, onPickPhoto: () -> Unit) {
     val still = camera.showingStill
     Row(Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(50.dp).clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(alpha = 0.35f))
-            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp)).clickable { onPickPhoto() }, contentAlignment = Alignment.Center) {
+            .border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(8.dp)).clickable(enabled = !camera.recording) { onPickPhoto() }, contentAlignment = Alignment.Center) {
             val thumb = camera.lastPhoto
             if (thumb != null) Image(thumb.asImageBitmap(), "Last photo; pick a photo", contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
             else Icon(Icons.Filled.PhotoLibrary, "Pick a photo", tint = Color.White)
         }
         Spacer(Modifier.weight(1f))
-        val enabled = (camera.status == CameraStatus.Running || still) && !camera.capturing
-        val pressScale by animateFloatAsState(if (camera.capturing) 0.85f else 1f, label = "shutter")
-        Box(Modifier.size(76.dp).border(4.dp, Color.White, CircleShape).padding(7.dp).alpha(if (enabled || camera.capturing) 1f else 0.35f)
-            .clip(CircleShape).clickable(enabled = enabled) { camera.shoot() }, contentAlignment = Alignment.Center) {
-            Box(Modifier.fillMaxSize().scale(pressScale).background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                if (still) Text("Save", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        val context = LocalContext.current
+        if (camera.videoMode && !still) {
+            // Record / stop: a red dot that turns into a square while recording.
+            val enabled = camera.status == CameraStatus.Running && !camera.savingVideo
+            val inner by animateDpAsState(if (camera.recording) 30.dp else 62.dp, label = "rec")
+            val corner by animateDpAsState(if (camera.recording) 6.dp else 31.dp, label = "recCorner")
+            Box(Modifier.size(76.dp).border(4.dp, Color.White, CircleShape).alpha(if (enabled) 1f else 0.35f)
+                .clip(CircleShape).clickable(enabled = enabled) {
+                    if (camera.recording) camera.stopRecording()
+                    else camera.startRecording(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+                }, contentAlignment = Alignment.Center) {
+                Box(Modifier.size(inner).background(RecordRed, RoundedCornerShape(corner)))
+            }
+        } else {
+            val enabled = (camera.status == CameraStatus.Running || still) && !camera.capturing
+            val pressScale by animateFloatAsState(if (camera.capturing) 0.85f else 1f, label = "shutter")
+            Box(Modifier.size(76.dp).border(4.dp, Color.White, CircleShape).padding(7.dp).alpha(if (enabled || camera.capturing) 1f else 0.35f)
+                .clip(CircleShape).clickable(enabled = enabled) { camera.shoot() }, contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxSize().scale(pressScale).background(Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                    if (still) Text("Save", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
         Spacer(Modifier.weight(1f))
         Box(Modifier.size(50.dp).clip(CircleShape).background(Color.Black.copy(alpha = 0.35f))
-            .clickable(enabled = camera.status == CameraStatus.Running && !still) { camera.flip() }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Filled.Cameraswitch, "Switch camera", tint = if (still) Color.Gray else Color.White)
+            .clickable(enabled = camera.status == CameraStatus.Running && !still && !camera.recording) { camera.flip() }, contentAlignment = Alignment.Center) {
+            Icon(Icons.Filled.Cameraswitch, "Switch camera", tint = if (still || camera.recording) Color.Gray else Color.White)
         }
     }
 }
@@ -456,20 +518,41 @@ private fun AdjustPanel(model: AppModel) {
         val s = if (v == v.roundToInt().toDouble()) "${abs(v).roundToInt()}" else "%.1f".format(abs(v))
         return (if (v > 0) "+" else if (v < 0) "−" else "") + s
     }
-    Column(Modifier.padding(horizontal = 20.dp).heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("PICTURE SETTINGS", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+    var tab by remember { mutableIntStateOf(0) }   // 0 Tone, 1 Color
+    val toneChanged = a.highlight != 0.0 || a.shadow != 0.0 || a.clarity != 0 || a.sharpness != 0
+    val colorChanged = a.copy(highlight = 0.0, shadow = 0.0, clarity = 0, sharpness = 0) != Adjustments.NEUTRAL
+    Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            AdjustTab("Tone", tab == 0, toneChanged) { tab = 0 }
+            AdjustTab("Color", tab == 1, colorChanged) { tab = 1 }
+            Spacer(Modifier.weight(1f))
             TextButton({ model.updateAdjust(Adjustments.NEUTRAL) }, enabled = !a.isNeutral) { Text("Reset", color = if (a.isNeutral) Color.Gray else Accent) }
         }
-        AdjustRow("Highlight", a.highlight, -2.0, 4.0, 0.5, 0.0, ::signed) { model.updateAdjust(a.copy(highlight = it)) }
-        AdjustRow("Shadow", a.shadow, -2.0, 4.0, 0.5, 0.0, ::signed) { model.updateAdjust(a.copy(shadow = it)) }
-        AdjustRow("Temperature", a.kelvin, 2500.0, 10000.0, 100.0, 5500.0, { if (it == 5500.0) "As shot" else "${it.roundToInt()}K" }) {
-            model.updateAdjust(a.copy(kelvin = it))
+        if (tab == 0) {
+            AdjustRow("Highlight", a.highlight, -2.0, 4.0, 0.5, 0.0, ::signed) { model.updateAdjust(a.copy(highlight = it)) }
+            AdjustRow("Shadow", a.shadow, -2.0, 4.0, 0.5, 0.0, ::signed) { model.updateAdjust(a.copy(shadow = it)) }
+            AdjustRow("Clarity", a.clarity.toDouble(), -5.0, 5.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(clarity = it.roundToInt())) }
+            AdjustRow("Sharpness", a.sharpness.toDouble(), -4.0, 4.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(sharpness = it.roundToInt())) }
+        } else {
+            AdjustRow("Color", a.color.toDouble(), -4.0, 4.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(color = it.roundToInt())) }
+            AdjustRow("Temperature", a.kelvin, 2500.0, 10000.0, 100.0, 5500.0, { if (it == 5500.0) "As shot" else "${it.roundToInt()}K" }) {
+                model.updateAdjust(a.copy(kelvin = it))
+            }
+            AdjustRow("WB shift Red", a.wbRed, -9.0, 9.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(wbRed = it)) }
+            AdjustRow("WB shift Blue", a.wbBlue, -9.0, 9.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(wbBlue = it)) }
+            ChoiceRow("Color Chrome", a.chrome) { model.updateAdjust(a.copy(chrome = it)) }
+            ChoiceRow("FX Blue", a.chromeBlue) { model.updateAdjust(a.copy(chromeBlue = it)) }
         }
-        AdjustRow("WB shift Red", a.wbRed, -9.0, 9.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(wbRed = it)) }
-        AdjustRow("WB shift Blue", a.wbBlue, -9.0, 9.0, 1.0, 0.0, ::signed) { model.updateAdjust(a.copy(wbBlue = it)) }
-        ChoiceRow("Color Chrome", a.chrome) { model.updateAdjust(a.copy(chrome = it)) }
-        ChoiceRow("FX Blue", a.chromeBlue) { model.updateAdjust(a.copy(chromeBlue = it)) }
+    }
+}
+
+/** Tab in the Adjust panel; a dot marks a tab with changed settings. */
+@Composable
+private fun AdjustTab(title: String, selected: Boolean, changed: Boolean, onClick: () -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(50)).background(if (selected) Accent.copy(alpha = 0.18f) else Color.Transparent)
+        .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(title, color = if (selected) Accent else Color.Gray, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (changed) Box(Modifier.padding(start = 5.dp).size(6.dp).background(Accent, CircleShape))
     }
 }
 
@@ -489,11 +572,11 @@ private fun AdjustRow(label: String, value: Double, lo: Double, hi: Double, step
 }
 
 @Composable
-private fun ChoiceRow(label: String, value: Int, onChange: (Int) -> Unit) {
+private fun ChoiceRow(label: String, value: Int, options: List<String> = listOf("Off", "Weak", "Strong"), onChange: (Int) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
         Text(label, color = Color.Gray, fontSize = 12.sp, modifier = Modifier.width(96.dp))
         Row(Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(8.dp))) {
-            listOf("Off", "Weak", "Strong").forEachIndexed { i, s ->
+            options.forEachIndexed { i, s ->
                 val sel = i == value
                 Text(s, color = if (sel) Accent else Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
                     modifier = Modifier.weight(1f).background(if (sel) Accent.copy(alpha = 0.18f) else Color.Transparent)

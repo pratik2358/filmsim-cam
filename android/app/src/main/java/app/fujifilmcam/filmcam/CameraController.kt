@@ -7,6 +7,7 @@ import android.graphics.ImageDecoder
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
 import android.net.Uri
+import android.os.SystemClock
 import android.opengl.GLSurfaceView
 import android.provider.MediaStore
 import android.util.Size
@@ -75,6 +76,13 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
     var portrait by mutableStateOf(false); private set
     var personFound by mutableStateOf(false); private set               // portrait: ML Kit currently sees someone
     var flashCount by mutableStateOf(0); private set                   // bumps on each shot (shutter animation)
+    var videoMode by mutableStateOf(false); private set
+    var recording by mutableStateOf(false); private set
+    var recordStartedAt by mutableStateOf(0L); private set             // SystemClock.elapsedRealtime()
+    var savingVideo by mutableStateOf(false); private set
+    var torch by mutableStateOf(false); private set                    // video mode: the flash stays lit
+    private var recorder: VideoRecorder? = null
+    private var holdDegrees = 0                                         // how the phone is held: 0/90/180/270
 
     private var provider: ProcessCameraProvider? = null
     private var camera: Camera? = null
@@ -98,6 +106,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
         override fun onOrientationChanged(deg: Int) {
             if (deg == ORIENTATION_UNKNOWN) return
             val r = when (deg) { in 45..134 -> Surface.ROTATION_270; in 135..224 -> Surface.ROTATION_180; in 225..314 -> Surface.ROTATION_90; else -> Surface.ROTATION_0 }
+            holdDegrees = when (r) { Surface.ROTATION_270 -> 90; Surface.ROTATION_180 -> 180; Surface.ROTATION_90 -> 270; else -> 0 }
             if (r != captureRotation) { captureRotation = r; capture?.targetRotation = r }
         }
     }
@@ -166,6 +175,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
             hasFlash = cam.cameraInfo.hasFlashUnit()
             status = CameraStatus.Running
             focusPoint = null; focusLocked = false; exposureBias = 0f
+            if (torch) cam.cameraControl.enableTorch(true)
             cam.cameraInfo.zoomState.observe(activity) { z ->
                 zoom = z.zoomRatio
                 val stops = mutableListOf<Float>()
@@ -181,7 +191,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
         }
     }
 
-    fun flip() { front = !front; bind() }
+    fun flip() { if (recording) return; front = !front; bind() }
 
     fun zoomTo(z: Float) { camera?.cameraControl?.setZoomRatio(z) }
 
@@ -191,12 +201,78 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
     }
 
     fun enablePortrait(on: Boolean) {
-        if (portrait == on) return
+        if (portrait == on || recording) return
         portrait = on
         renderer.portrait = on
         if (!on) renderer.setMask(null)
         personFound = false
         bind()
+    }
+
+    // ---- Video ----
+
+    fun updateVideoMode(on: Boolean) {
+        if (recording || savingVideo || videoMode == on) return
+        videoMode = on
+        if (!on && torch) toggleTorch()
+    }
+
+    fun toggleTorch() {
+        torch = !torch
+        camera?.cameraControl?.enableTorch(torch)
+    }
+
+    /** Records what the viewfinder shows, with the look. `withAudio` needs the microphone permission. */
+    fun startRecording(withAudio: Boolean) {
+        if (recording || savingVideo || capturing || showingStill || status != CameraStatus.Running) return
+        val aspect = glView.width.toFloat() / max(1, glView.height)
+        // Held sideways: the file says how to turn it upright. The saved video isn't mirrored, so for the
+        // front camera a quarter turn goes the other way.
+        val rotation = if (front && holdDegrees % 180 != 0) 360 - holdDegrees else holdDegrees
+        val token = Any()
+        startToken = token
+        recording = true; recordStartedAt = SystemClock.elapsedRealtime()
+        // Creating the file goes through the media database, which can be slow: never on the main thread.
+        worker.execute {
+            val created = runCatching { VideoRecorder(activity, aspect, rotation, withAudio).also { it.start() } }
+            main.execute {
+                val r = created.getOrElse {
+                    if (startToken === token) { startToken = null; recording = false }
+                    message = "Couldn't start recording: ${it.message}"; return@execute
+                }
+                if (startToken !== token) { worker.execute { r.cancel() }; return@execute }   // stopped meanwhile
+                startToken = null
+                recorder = r
+                renderer.attachEncoder(r.inputSurface, r.width, r.height).whenComplete { _, err ->
+                    if (err == null) return@whenComplete
+                    main.execute {
+                        if (recorder === r) { recorder = null; recording = false }
+                        worker.execute { r.cancel() }
+                        message = "Video recording isn't supported on this phone (${err.message})."
+                    }
+                }
+            }
+        }
+    }
+    private var startToken: Any? = null
+
+    fun stopRecording() {
+        if (startToken != null) { startToken = null; recording = false; return }   // still setting up: just cancel
+        val r = recorder ?: return
+        recorder = null; recording = false; savingVideo = true
+        renderer.detachEncoder().whenComplete { _, _ ->
+            worker.execute {
+                val result = runCatching { r.finish(); r.uri }
+                val thumb = result.getOrNull()?.let { uri ->
+                    runCatching { activity.contentResolver.loadThumbnail(uri, Size(320, 320), null) }.getOrNull()
+                }
+                main.execute {
+                    savingVideo = false
+                    result.onSuccess { thumb?.let { lastPhoto = it } }
+                        .onFailure { message = "Couldn't save the video: ${it.message}" }
+                }
+            }
+        }
     }
 
     // ---- Focus & exposure ----
@@ -267,6 +343,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
     // ---- Library photos ----
 
     fun openPhoto(uri: Uri) {
+        if (recording) return
         worker.execute {
             try {
                 val full = ImageDecoder.decodeBitmap(ImageDecoder.createSource(activity.contentResolver, uri)) { d, info, _ ->
@@ -295,7 +372,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
     // ---- Capture ----
 
     fun shoot() {
-        if (capturing) return
+        if (capturing || recording) return
         val still = stillFull
         if (showingStill && still != null) {
             capturing = true
@@ -362,6 +439,7 @@ class CameraController(private val activity: ComponentActivity, val glView: GLSu
     }
 
     fun release() {
+        stopRecording()
         worker.shutdown(); analysisExecutor.shutdown()
         runCatching { provider?.unbindAll() }
     }

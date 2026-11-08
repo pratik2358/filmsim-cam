@@ -45,7 +45,9 @@ class AppModel(context: Context, private val renderer: FilmRenderer) {
         adjust = a
         prefs.edit().putFloat("adj.highlight", a.highlight.toFloat()).putFloat("adj.shadow", a.shadow.toFloat())
             .putFloat("adj.kelvin", a.kelvin.toFloat()).putFloat("adj.wbRed", a.wbRed.toFloat()).putFloat("adj.wbBlue", a.wbBlue.toFloat())
-            .putInt("adj.chrome", a.chrome).putInt("adj.chromeBlue", a.chromeBlue).apply()
+            .putInt("adj.chrome", a.chrome).putInt("adj.chromeBlue", a.chromeBlue)
+            .putInt("adj.color", a.color).putInt("adj.sharpness", a.sharpness).putInt("adj.clarity", a.clarity).apply()
+        applyShaderSettings()
         applyLook()
     }
 
@@ -59,7 +61,14 @@ class AppModel(context: Context, private val renderer: FilmRenderer) {
         prefs.getFloat("adj.highlight", 0f).toDouble(), prefs.getFloat("adj.shadow", 0f).toDouble(),
         prefs.getFloat("adj.kelvin", 5500f).toDouble(), prefs.getFloat("adj.wbRed", 0f).toDouble(),
         prefs.getFloat("adj.wbBlue", 0f).toDouble(), prefs.getInt("adj.chrome", 0), prefs.getInt("adj.chromeBlue", 0),
+        prefs.getInt("adj.color", 0), prefs.getInt("adj.sharpness", 0), prefs.getInt("adj.clarity", 0),
     )
+
+    private fun applyShaderSettings() {
+        renderer.sharpness = adjust.sharpAmount
+        renderer.clarity = adjust.clarityAmount
+        renderer.requestRender()
+    }
 
     // Look + strength + picture settings are baked into one LUT off the main thread; only the newest request wins.
     private val baker = Executors.newSingleThreadExecutor()
@@ -71,7 +80,7 @@ class AppModel(context: Context, private val renderer: FilmRenderer) {
         baker.execute {
             if (latest.get() != req) return@execute
             val look = if (t > 0.001) library.lut(id) else null
-            val data = if (look == null && a.isNeutral) null else a.bake(look, t)
+            val data = if (look == null && a.isNeutralLut) null else a.bake(look, t)
             if (latest.get() == req) renderer.setLut(data)
         }
     }
@@ -79,6 +88,7 @@ class AppModel(context: Context, private val renderer: FilmRenderer) {
     init {
         renderer.grain = GRAIN[grain]
         renderer.aperture = aperture
+        applyShaderSettings()
         applyLook()
     }
 

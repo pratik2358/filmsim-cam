@@ -3,19 +3,40 @@ package app.fujifilmcam.filmcam
 import android.graphics.Bitmap
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
+import android.opengl.EGL14
+import android.opengl.EGLExt
+import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES30.*
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
 import android.opengl.Matrix
+import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CompletableFuture
+import javax.microedition.khronos.egl.EGL10
 import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.egl.EGLDisplay
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+
+/** Picks a GLES 3 config that can also draw into a video encoder (EGL_RECORDABLE_ANDROID), if the phone has one. */
+class RecordableConfigChooser : GLSurfaceView.EGLConfigChooser {
+    override fun chooseConfig(egl: EGL10, display: EGLDisplay): EGLConfig {
+        fun pick(recordable: Boolean): EGLConfig? {
+            val attrs = intArrayOf(EGL10.EGL_RED_SIZE, 8, EGL10.EGL_GREEN_SIZE, 8, EGL10.EGL_BLUE_SIZE, 8,
+                EGL10.EGL_RENDERABLE_TYPE, 0x40 /* EGL_OPENGL_ES3_BIT */) +
+                (if (recordable) intArrayOf(0x3142 /* EGL_RECORDABLE_ANDROID */, 1) else intArrayOf()) + EGL10.EGL_NONE
+            val out = arrayOfNulls<EGLConfig>(1); val n = IntArray(1)
+            return if (egl.eglChooseConfig(display, attrs, out, 1, n) && n[0] > 0) out[0] else null
+        }
+        return pick(true) ?: pick(false) ?: error("no OpenGL ES 3 support")
+    }
+}
 
 /** Portrait-mode person mask (0 = background, 255 = person), upright and un-mirrored. */
 class Mask(val data: ByteBuffer, val width: Int, val height: Int, val hasPerson: Boolean)
@@ -42,6 +63,8 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
     @Volatile private var stillVersion = 0
     @Volatile private var mask: Mask? = null
     @Volatile private var maskVersion = 0
+    @Volatile var sharpness = 0f                        // shader amounts (Adjustments.sharpAmount / clarityAmount)
+    @Volatile var clarity = 0f
     @Volatile var frozen = false                        // hold the last frame while a photo is processed
 
     /** Visible part of the source (normalized, upright, top-left origin); also what photos are cropped to. */
@@ -49,6 +72,7 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
     /** Called (on the GL thread) once the camera surface exists, e.g. after the GL context is recreated. */
     var onSurfaceTextureReady: ((SurfaceTexture) -> Unit)? = null
 
+    fun requestRender() = view.requestRender()
     fun setLut(data: ByteArray?) { lut = data; lutVersion++; view.requestRender() }
     fun setStill(bmp: Bitmap?) { still = bmp; stillVersion++; view.requestRender() }
     fun setMask(m: Mask?) { mask = m; maskVersion++ }
@@ -73,6 +97,7 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
     private var bgFbo = 0; private var bgTex = 0; private var bgW = 0; private var bgH = 0
     private val stMatrix = FloatArray(16)
     private var viewW = 1; private var viewH = 1
+    private var encSurface: EGLSurface? = null; private var encW = 0; private var encH = 0
     var maxTextureSize = 4096; private set
     private val quad = ByteBuffer.allocateDirect(32).order(ByteOrder.nativeOrder()).asFloatBuffer()
         .apply { put(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f)); position(0) }
@@ -82,6 +107,7 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
         val ids = IntArray(5); glGenTextures(5, ids, 0)
         camTex = ids[0]; lutTex = ids[1]; stillTex = ids[2]; maskTex = ids[3]; bgTex = ids[4]
         lutUploaded = -1; stillUploaded = -1; maskUploaded = -1; bgW = 0
+        encSurface = null   // a new context: any recording surface belonged to the old one
         glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, camTex)
         linear(GLES11Ext.GL_TEXTURE_EXTERNAL_OES)
         for (t in intArrayOf(stillTex, maskTex)) { glBindTexture(GL_TEXTURE_2D, t); linear(GL_TEXTURE_2D) }
@@ -114,19 +140,66 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
             val s = min(viewW.toFloat() / sw, viewH.toFloat() / sh)
             val w = (sw * s).roundToInt(); val h = (sh * s).roundToInt()
             val portraitOn = portrait && mask?.hasPerson == true
-            if (portraitOn) blurPass(prog2d, GL_TEXTURE_2D, stillTex, identityTexMat(), mirrorImage = false)
+            if (portraitOn || clarity != 0f) blurPass(prog2d, GL_TEXTURE_2D, stillTex, identityTexMat(), mirrorImage = false)
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
             glViewport((viewW - w) / 2, (viewH - h) / 2, w, h)
             draw(prog2d, GL_TEXTURE_2D, stillTex, identityTexMat(), RectF(0f, 0f, 1f, 1f), w, h,
-                flipY = false, mirror = false, seed = 0f, portraitOn = portraitOn)
+                flipY = false, mirror = false, seed = 0f, portraitOn = portraitOn, srcW = sw, srcH = sh)
         } else if (bufferW > 0) {
             crop = centerCrop(sw.toFloat() / sh, viewW.toFloat() / viewH)
             val portraitOn = portrait && mask?.hasPerson == true   // no person found: leave the picture sharp
-            if (portraitOn) blurPass(progOes, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, camTex, cameraTexMat(), mirror && !transformRotates)
+            if (portraitOn || clarity != 0f) blurPass(progOes, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, camTex, cameraTexMat(), mirror && !transformRotates)
             glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, viewW, viewH)
+            val seed = (Math.random() * 1000).toFloat()
             draw(progOes, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, camTex, cameraTexMat(), crop, viewW, viewH,
-                flipY = false, mirror = mirror, seed = (Math.random() * 1000).toFloat(), portraitOn = portraitOn)
+                flipY = false, mirror = mirror, seed = seed, portraitOn = portraitOn, srcW = sw, srcH = sh)
+            encSurface?.let { encodeFrame(it, sw, sh, seed, portraitOn) }
         }
+    }
+
+    // ---- Video: the same picture, drawn a second time into the encoder's surface ----
+
+    /** Starts drawing every camera frame into `surface` (a MediaCodec input surface) at w×h. */
+    fun attachEncoder(surface: Surface, w: Int, h: Int): CompletableFuture<Unit> {
+        val done = CompletableFuture<Unit>()
+        view.queueEvent {
+            try {
+                val d = EGL14.eglGetCurrentDisplay(); val ctx = EGL14.eglGetCurrentContext()
+                check(ctx != EGL14.EGL_NO_CONTEXT) { "no GL context" }
+                val id = IntArray(1); EGL14.eglQueryContext(d, ctx, EGL14.EGL_CONFIG_ID, id, 0)
+                val cfg = arrayOfNulls<android.opengl.EGLConfig>(1); val n = IntArray(1)
+                EGL14.eglChooseConfig(d, intArrayOf(EGL14.EGL_CONFIG_ID, id[0], EGL14.EGL_NONE), 0, cfg, 0, 1, n, 0)
+                val s = EGL14.eglCreateWindowSurface(d, cfg[0], surface, intArrayOf(EGL14.EGL_NONE), 0)
+                check(s != null && s != EGL14.EGL_NO_SURFACE) { "video surface error 0x%x".format(EGL14.eglGetError()) }
+                encSurface = s; encW = w; encH = h
+                done.complete(Unit)
+            } catch (t: Throwable) { done.completeExceptionally(t) }
+        }
+        return done
+    }
+
+    /** Stops drawing into the encoder; completes once no more frames will be sent. */
+    fun detachEncoder(): CompletableFuture<Unit> {
+        val done = CompletableFuture<Unit>()
+        view.queueEvent {
+            encSurface?.let { runCatching { EGL14.eglDestroySurface(EGL14.eglGetCurrentDisplay(), it) } }
+            encSurface = null
+            done.complete(Unit)
+        }
+        return done
+    }
+
+    private fun encodeFrame(enc: EGLSurface, sw: Int, sh: Int, seed: Float, portraitOn: Boolean) {
+        val d = EGL14.eglGetCurrentDisplay(); val ctx = EGL14.eglGetCurrentContext()
+        val drawS = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW); val readS = EGL14.eglGetCurrentSurface(EGL14.EGL_READ)
+        if (!EGL14.eglMakeCurrent(d, enc, enc, ctx)) return
+        glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, encW, encH)
+        // Saved videos aren't mirrored (like photos): the front camera's picture is flipped back on output.
+        draw(progOes, GLES11Ext.GL_TEXTURE_EXTERNAL_OES, camTex, cameraTexMat(), centerCrop(sw.toFloat() / sh, encW.toFloat() / encH),
+            encW, encH, flipY = false, mirror = mirror, seed = seed, portraitOn = portraitOn, srcW = sw, srcH = sh, flipOutput = mirror)
+        EGLExt.eglPresentationTimeANDROID(d, enc, System.nanoTime())
+        EGL14.eglSwapBuffers(d, enc)
+        EGL14.eglMakeCurrent(d, drawS, readS, ctx)
     }
 
     /**
@@ -151,16 +224,14 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
                 glBindTexture(GL_TEXTURE_2D, outTex); linear(GL_TEXTURE_2D)
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, outW, outH, 0, GL_RGBA, GL_UNSIGNED_BYTE, null)
                 val portraitOn = applyPortrait && photoMask?.hasPerson == true
-                if (portraitOn) {
-                    uploadMask(photoMask!!)
-                    blurPass(prog2d, GL_TEXTURE_2D, srcTex, identityTexMat(), mirrorImage = false)
-                }
+                if (portraitOn) uploadMask(photoMask!!)
+                if (portraitOn || clarity != 0f) blurPass(prog2d, GL_TEXTURE_2D, srcTex, identityTexMat(), mirrorImage = false)
                 val fb = IntArray(1); glGenFramebuffers(1, fb, 0)
                 glBindFramebuffer(GL_FRAMEBUFFER, fb[0])
                 glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outTex, 0)
                 glViewport(0, 0, outW, outH)
                 draw(prog2d, GL_TEXTURE_2D, srcTex, identityTexMat(), crop, outW, outH,
-                    flipY = true, mirror = false, seed = 0f, portraitOn = portraitOn)
+                    flipY = true, mirror = false, seed = 0f, portraitOn = portraitOn, srcW = src.width, srcH = src.height)
                 val buf = ByteBuffer.allocateDirect(outW * outH * 4).order(ByteOrder.nativeOrder())
                 glPixelStorei(GL_PACK_ALIGNMENT, 1)
                 glReadPixels(0, 0, outW, outH, GL_RGBA, GL_UNSIGNED_BYTE, buf)
@@ -178,7 +249,8 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
     // ---- Drawing ----
 
     private fun draw(prog: Int, target: Int, tex: Int, texMat: FloatArray, crop: RectF, outW: Int, outH: Int,
-                     flipY: Boolean, mirror: Boolean, seed: Float, portraitOn: Boolean) {
+                     flipY: Boolean, mirror: Boolean, seed: Float, portraitOn: Boolean, srcW: Int, srcH: Int,
+                     flipOutput: Boolean = false) {
         glUseProgram(prog)
         val aPos = glGetAttribLocation(prog, "aPos")
         glEnableVertexAttribArray(aPos); glVertexAttribPointer(aPos, 2, GL_FLOAT, false, 0, quad)
@@ -189,6 +261,7 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
         glUniformMatrix4fv(u(prog, "uTexMat"), 1, false, texMat, 0)
         glUniform4f(u(prog, "uCrop"), crop.left, crop.top, crop.width(), crop.height())
         glUniform1i(u(prog, "uFlipY"), if (flipY) 1 else 0)
+        glUniform1i(u(prog, "uFlipOut"), if (flipOutput) 1 else 0)
         // With a camera transform the stream is already mirrored for the front camera; the person mask never is.
         glUniform1i(u(prog, "uMirror"), if (mirror && !transformRotates) 1 else 0)
         glUniform1i(u(prog, "uMaskMirror"), if (mirror) 1 else 0)
@@ -200,6 +273,15 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
         glUniform1f(u(prog, "uGrain"), grain)
         glUniform1f(u(prog, "uGrainScale"), max(1f, min(outW, outH) / 1080f))
         glUniform1f(u(prog, "uSeed"), seed)
+        // Sharpness works one output pixel apart; Clarity samples the small blurred copy (bgTex) around a
+        // radius of 1.2 % of the picture's short side.
+        glUniform2f(u(prog, "uPx"), crop.width() / outW, crop.height() / outH)
+        glUniform1f(u(prog, "uSharp"), sharpness)
+        glUniform1f(u(prog, "uClarity"), clarity)
+        val r = 0.012f * min(srcW * crop.width(), srcH * crop.height())
+        val rx = r / max(1, srcW); val ry = r / max(1, srcH)
+        glUniform2f(u(prog, "uClarityR"), rx, ry)
+        glUniform1f(u(prog, "uClarityLod"), (ln(max(1f, 448f * min(rx, ry) * 0.5f)) / ln(2f)))
         glUniform1i(u(prog, "uBlurPass"), 0)
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
     }
@@ -230,6 +312,7 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
         glUniformMatrix4fv(u(prog, "uTexMat"), 1, false, texMat, 0)
         glUniform4f(u(prog, "uCrop"), 0f, 0f, 1f, 1f)
         glUniform1i(u(prog, "uFlipY"), 1)
+        glUniform1i(u(prog, "uFlipOut"), 0)
         glUniform1i(u(prog, "uMirror"), if (mirrorImage) 1 else 0)   // the blur copy is in display space
         glUniform1i(u(prog, "uBlurPass"), 1)
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
@@ -309,11 +392,11 @@ class FilmRenderer(private val view: GLSurfaceView) : GLSurfaceView.Renderer {
 
         private const val VERT = """#version 300 es
 in vec2 aPos; out vec2 vUv;
-uniform vec4 uCrop; uniform bool uFlipY;
+uniform vec4 uCrop; uniform bool uFlipY, uFlipOut;
 void main() {
   vec2 p = aPos * 0.5 + 0.5;
   vUv = uCrop.xy + vec2(p.x, uFlipY ? p.y : 1.0 - p.y) * uCrop.zw;   // upright, top-left origin
-  gl_Position = vec4(aPos, 0.0, 1.0);
+  gl_Position = vec4(uFlipOut ? -aPos.x : aPos.x, aPos.y, 0.0, 1.0);   // uFlipOut: mirror the output left-right
 }"""
 
         private fun frag(oes: Boolean) = """#version 300 es
@@ -325,6 +408,8 @@ uniform mat4 uTexMat; uniform bool uMirror, uMaskMirror, uBlurPass;
 uniform sampler3D uLut; uniform bool uHasLut;
 uniform sampler2D uMask, uBg; uniform bool uPortrait; uniform vec2 uBlur;
 uniform float uGrain, uGrainScale, uSeed;
+uniform vec2 uPx, uClarityR; uniform float uSharp, uClarity, uClarityLod;
+const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
 const vec2 DISK[16] = vec2[16](
   vec2(-0.613, 0.617), vec2(0.170, -0.040), vec2(-0.299, 0.791), vec2(0.645, 0.493),
   vec2(-0.651, 0.717), vec2(0.421, 0.027), vec2(-0.817, -0.271), vec2(-0.705, -0.668),
@@ -336,14 +421,31 @@ float valueNoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
 }
-bool maskMirror;
+bool maskMirror, mirrorImg;
+vec3 src(vec2 uv) { return img(mirrorImg ? vec2(1.0 - uv.x, uv.y) : uv); }
 float bgWeight(vec2 uv) { return 1.0 - smoothstep(0.35, 0.75, texture(uMask, maskMirror ? vec2(1.0 - uv.x, uv.y) : uv).r); }
 void main() {
   // vUv: display space (upright, as shown). Image, mask and blur copy are sampled in their own spaces.
   vec2 uv = vUv;
-  maskMirror = uMaskMirror;
-  vec3 c = img(uMirror ? vec2(1.0 - uv.x, uv.y) : uv);
+  maskMirror = uMaskMirror; mirrorImg = uMirror;
+  vec3 c = src(uv);
   if (uBlurPass) { outColor = vec4(c, 1.0); return; }
+  if (uSharp != 0.0) {
+    // Sharpness: detail = pixel minus its neighbours one output pixel away, added on luminance (+),
+    // or blended towards the neighbours (−, softer).
+    vec3 b = 0.25 * (src(uv + vec2(uPx.x, 0.0)) + src(uv - vec2(uPx.x, 0.0)) + src(uv + vec2(0.0, uPx.y)) + src(uv - vec2(0.0, uPx.y)));
+    c = uSharp > 0.0 ? c + clamp(dot(c - b, LUM) * uSharp, -0.12, 0.12) : c + (c - b) * uSharp;
+  }
+  if (uClarity != 0.0) {
+    // Clarity: local contrast against a wide blur, strongest in the midtones.
+    vec3 b = textureLod(uBg, uv, uClarityLod).rgb;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.7854;
+      b += textureLod(uBg, clamp(uv + vec2(cos(a), sin(a)) * uClarityR, 0.0, 1.0), uClarityLod).rgb;
+    }
+    float y = dot(c, LUM), d = y - dot(b / 9.0, LUM);
+    c += uClarity * d * 4.0 * y * (1.0 - y);
+  }
   if (uPortrait) {
     // Blur the background only, from a small mipmapped copy; people (mask) stay sharp and don't bleed.
     float bg = bgWeight(uv);
