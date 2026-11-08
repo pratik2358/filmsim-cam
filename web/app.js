@@ -1,7 +1,7 @@
 // FilmCam for the web: live camera with film looks applied on the GPU (WebGL2 + 3D LUTs).
 // Everything runs locally; nothing is uploaded.
 
-import { ADJUST_DEFAULTS, isDefaultAdjust, bakeLUT } from './adjust.js';
+import { ADJUST_DEFAULTS, isDefaultAdjust, bakeLUT, drStops, drShader, sharpAmount, clarityAmount, lutKey, isNeutralLut } from './adjust.js';
 
 const LUT_SIZE = 33;
 
@@ -63,6 +63,9 @@ const state = {
   lens: { deviceId: null, stops: [], current: null },
   focus: { point: null, locked: false, meterEV: 0, userEV: 0, hwExposure: false, hwFocus: false },
   dirty: true,
+  videoMode: false,
+  recording: null,         // { rec, mic, chunks, start, mirror, timer } while a video is being recorded
+  pendingVideo: null,      // iPhone: a finished video waiting for a tap to open the share sheet
 };
 window.filmcam = { state };   // handy for debugging in the browser console
 const lutData = new Map();   // id -> Uint8Array (RGB8, 33³)
@@ -83,7 +86,9 @@ const FRAG = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 outColor;
 uniform sampler2D uImage; uniform sampler3D uLut;
-uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed, uGain;
+uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed, uGain, uKnee;
+uniform vec2 uPx, uClarityR; uniform float uSharp, uClarity, uClarityLod;
+const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
 vec3 toLin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
 vec3 toSrgb(vec3 c) { return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c)); }
 float hash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -93,15 +98,30 @@ float valueNoise(vec2 p) {
 }
 void main() {
   vec3 c = texture(uImage, vUv).rgb;
-  if (uGain != 1.0) {
-    vec3 l = toLin(c) * uGain;
-    if (uGain > 1.0) {
-      // Highlight shoulder: brightening rolls bright areas off smoothly towards white instead of
-      // clipping them. Applied to the brightest channel so colours keep their hue.
-      const float K = 0.55;
-      float m = max(max(l.r, l.g), l.b);
-      if (m > K) l *= (K + (1.0 - K) * (1.0 - exp(-(m - K) / (1.0 - K)))) / m;
+  if (uSharp != 0.0) {
+    // Sharpness: detail = pixel minus its neighbours (one output pixel away), added on luminance;
+    // negative settings blend towards the neighbours instead (softer).
+    vec3 b = 0.25 * (texture(uImage, vUv + vec2(uPx.x, 0.0)).rgb + texture(uImage, vUv - vec2(uPx.x, 0.0)).rgb
+                   + texture(uImage, vUv + vec2(0.0, uPx.y)).rgb + texture(uImage, vUv - vec2(0.0, uPx.y)).rgb);
+    c = uSharp > 0.0 ? c + clamp(dot(c - b, LUM) * uSharp, -0.12, 0.12) : c + (c - b) * uSharp;
+  }
+  if (uClarity != 0.0) {
+    // Clarity: local contrast against a wide blur (from the mipmaps), strongest in the midtones.
+    vec3 b = textureLod(uImage, vUv, uClarityLod).rgb;
+    for (int i = 0; i < 8; i++) {
+      float a = float(i) * 0.7854;
+      b += textureLod(uImage, vUv + vec2(cos(a), sin(a)) * uClarityR, uClarityLod).rgb;
     }
+    float y = dot(c, LUM), d = y - dot(b / 9.0, LUM);
+    c += uClarity * d * 4.0 * y * (1.0 - y);
+  }
+  // Exposure gain (software metering, dynamic range) with a highlight shoulder: bright areas roll off
+  // smoothly towards white instead of clipping. Applied to the brightest channel so colours keep their hue.
+  float K = min(uKnee, uGain > 1.0 ? 0.55 : 1.0);
+  if (uGain != 1.0 || K < 1.0) {
+    vec3 l = toLin(clamp(c, 0.0, 1.0)) * uGain;
+    float m = max(max(l.r, l.g), l.b);
+    if (K < 1.0 && m > K) l *= (K + (1.0 - K) * (1.0 - exp(-(m - K) / (1.0 - K)))) / m;
     c = toSrgb(clamp(l, 0.0, 1.0));
   }
   if (uHasLut) {
@@ -133,7 +153,8 @@ function initGL() {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
   gl.useProgram(prog);
-  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain', 'uCrop']
+  loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain', 'uCrop',
+    'uKnee', 'uPx', 'uClarityR', 'uSharp', 'uClarity', 'uClarityLod']
     .map((n) => [n, gl.getUniformLocation(prog, n)]));
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -157,8 +178,8 @@ function initGL() {
 let bakedTex = null, bakedKey = '';
 function currentLutTexture() {
   const look = state.filmId === 'original' ? null : lutData.get(state.filmId);
-  if (!look && isDefaultAdjust(state.adjust)) return null;
-  const key = `${look ? state.filmId : '-'}|${state.intensity}|${JSON.stringify(state.adjust)}`;
+  if (!look && isNeutralLut(state.adjust)) return null;
+  const key = `${look ? state.filmId : '-'}|${state.intensity}|${lutKey(state.adjust)}`;
   if (key !== bakedKey) {
     const data = bakeLUT(LUT_SIZE, look ? (c) => sampleLUT(look, c) : null, state.intensity, state.adjust);
     if (!bakedTex) {
@@ -187,6 +208,20 @@ function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL
   gl.bindTexture(gl.TEXTURE_2D, imageTex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  const a = state.adjust;
+  // Clarity samples a wide blur from the mipmaps (only built when it's on).
+  if (a.clarity) gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, a.clarity ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+  const sw = source.videoWidth || source.width, sh = source.videoHeight || source.height;
+  const r = 0.012 * Math.min(sw * crop.w, sh * crop.h);   // clarity radius: 1.2 % of the picture's short side
+  gl.uniform2f(loc.uPx, crop.w / w, crop.h / h);
+  gl.uniform1f(loc.uSharp, sharpAmount(a.sharpness));
+  gl.uniform1f(loc.uClarity, clarityAmount(a.clarity));
+  gl.uniform2f(loc.uClarityR, r / sw, r / sh);
+  gl.uniform1f(loc.uClarityLod, Math.log2(Math.max(1, r * 0.5)));
+  const camera = state.mode === 'camera';
+  const dr = drShader(a, camera && state.focus.hwExposure ? drStops(a) : 0);
+  gl.uniform1f(loc.uKnee, dr.knee);
   const tex = currentLutTexture();
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_3D, tex);
@@ -198,7 +233,7 @@ function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL
   gl.uniform1f(loc.uSeed, animateGrain ? Math.random() * 1000 : 0);
   gl.uniform1i(loc.uMirror, mirror ? 1 : 0);
   gl.uniform4f(loc.uCrop, crop.x, crop.y, crop.w, crop.h);
-  gl.uniform1f(loc.uGain, state.mode === 'camera' ? Math.pow(2, softwareEV()) : 1);
+  gl.uniform1f(loc.uGain, (camera ? Math.pow(2, softwareEV()) : 1) * dr.gain);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -304,7 +339,7 @@ async function setupLenses() {
 
 async function pickLens(stop) {
   const L = state.lens;
-  if (stop.label === L.current) return;
+  if (stop.label === L.current || state.recording) return;
   L.current = stop.label; drawLenses();
   if (stop.kind === 'zoom') {
     try { await track()?.applyConstraints({ advanced: [{ zoom: stop.zoom }] }); } catch { toast('This camera can’t zoom here.'); }
@@ -349,6 +384,14 @@ function setupFocus() {
   resetFocus(false);
 }
 
+/** Hardware exposure compensation for `ev`, minus the stops DR200/400 underexpose by (null if unsupported). */
+function hwEV(ev) {
+  const c = track()?.getCapabilities?.().exposureCompensation;
+  if (!c) return null;
+  const step = c.step || 0.1;
+  return Math.max(c.min, Math.min(c.max, Math.round((ev - drStops(state.adjust)) / step) * step));
+}
+
 async function applyTrack(c) {
   try { await track()?.applyConstraints({ advanced: [c] }); return true; } catch { return false; }
 }
@@ -361,7 +404,7 @@ function resetFocus(updateHw = true) {
     const c = {};
     if ((caps.focusMode || []).includes('continuous')) c.focusMode = 'continuous';
     if ((caps.exposureMode || []).includes('continuous')) c.exposureMode = 'continuous';
-    if (caps.exposureCompensation) c.exposureCompensation = 0;
+    if (caps.exposureCompensation) c.exposureCompensation = hwEV(0);
     if (Object.keys(c).length) applyTrack(c);
   }
   drawFocusUI();
@@ -383,7 +426,7 @@ async function focusAt(x, y, lock) {
   if (fm.includes('single-shot')) c.focusMode = 'single-shot';
   if (lock && em.includes('single-shot')) c.exposureMode = 'single-shot';
   else if (em.includes('continuous')) c.exposureMode = 'continuous';
-  if (caps.exposureCompensation) c.exposureCompensation = 0;
+  if (caps.exposureCompensation) c.exposureCompensation = hwEV(0);
   const hwOK = Object.keys(c).length ? await applyTrack(c) : false;
   // Without hardware metering at a point, meter the spot in software.
   f.meterEV = caps.pointsOfInterest && hwOK ? 0 : spotMeterEV(sx, y);
@@ -422,12 +465,8 @@ function setUserEV(ev) {
   const f = state.focus;
   f.userEV = Math.max(-EV_RANGE, Math.min(EV_RANGE, ev));
   if (f.hwExposure) {
-    const c = track()?.getCapabilities?.().exposureCompensation;
-    if (c) {
-      const step = c.step || 0.1;
-      const v = Math.max(c.min, Math.min(c.max, Math.round(f.userEV / step) * step));
-      clearTimeout(evTimer); evTimer = setTimeout(() => applyTrack({ exposureCompensation: v }), 30);
-    }
+    const v = hwEV(f.userEV);
+    if (v !== null) { clearTimeout(evTimer); evTimer = setTimeout(() => applyTrack({ exposureCompensation: v }), 30); }
   }
   drawFocusUI();
 }
@@ -493,10 +532,12 @@ function sourceSize() {
   return [video.videoWidth, video.videoHeight];
 }
 
-/** Preview renders at screen resolution (cheap); photos render at full resolution. */
-function previewSize(w, h) {
+/** Preview renders at screen resolution (cheap), or 1080 px across while recording video; photos render at full resolution. */
+function previewSize(w, h, recording = !!state.recording) {
   const cw = w * state.crop.w, ch = h * state.crop.h;
-  const s = Math.min(1, $('frame').clientWidth * Math.min(2, devicePixelRatio || 1) / cw);
+  const screen = $('frame').clientWidth * Math.min(2, devicePixelRatio || 1);
+  const video1080 = 1080 * cw / Math.min(cw, ch);   // width that makes the short side 1080 px
+  const s = Math.min(1, (recording ? Math.max(screen, video1080) : screen) / cw);
   return [Math.max(1, Math.round(cw * s)), Math.max(1, Math.round(ch * s))];
 }
 
@@ -506,6 +547,7 @@ function frame() {
     const [w, h] = sourceSize();
     layoutFrame(w, h);
     render(video, ...previewSize(w, h), { mirror: state.facing === 'user', crop: state.crop });
+    if (state.recording) copyToRecorder();
   } else if (state.mode === 'still' && state.still && state.dirty) {
     const [w, h] = sourceSize();
     layoutFrame(w, h);
@@ -558,7 +600,7 @@ function ratioName(w, h) {
 // ---------- Capture & save ----------
 async function shoot() {
   const btn = $('btn-shutter');
-  if (state.capturing) return;
+  if (state.capturing || state.recording) return;
   state.capturing = true;
   let w, h;
   if (state.mode === 'still' && state.still) {
@@ -592,7 +634,8 @@ const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS reports as a Mac
 
 async function saveBlob(blob, name) {
-  const file = new File([blob], name, { type: 'image/jpeg' });
+  const file = new File([blob], name, { type: blob.type || 'image/jpeg' });
+  const what = file.type.startsWith('video') ? 'Video' : 'Photo';
   if (isAppleMobile && navigator.canShare?.({ files: [file] })) {
     await navigator.share({ files: [file] });
     return;
@@ -601,7 +644,96 @@ async function saveBlob(blob, name) {
   const a = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
-  toast(/Android/i.test(navigator.userAgent) ? 'Saved to Downloads, also in your gallery' : 'Photo saved to your downloads');
+  toast(/Android/i.test(navigator.userAgent) ? 'Saved to Downloads, also in your gallery' : `${what} saved to your downloads`);
+}
+
+// ---------- Video ----------
+// Each camera frame is copied from the WebGL canvas onto recCanvas (un-mirrored for the selfie camera,
+// like photos) and recorded from there with MediaRecorder, together with the microphone.
+const recCanvas = document.createElement('canvas');
+const recCtx = recCanvas.getContext('2d');
+let recStarting = false, recCancel = false;
+
+function videoMime() {
+  const types = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  return types.find((t) => MediaRecorder.isTypeSupported?.(t)) || '';
+}
+
+async function startRecording() {
+  if (recStarting) { recCancel = true; return; }   // tapped again while the microphone was opening
+  if (state.recording || !state.stream || state.mode !== 'camera') return;
+  if (!window.MediaRecorder || !recCanvas.captureStream) { toast('This browser can’t record video.'); return; }
+  recStarting = true; recCancel = false;
+  $('btn-shutter').classList.add('busy');
+  let mic = null;
+  try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { toast('Recording without sound (no microphone access).'); }
+  recStarting = false;
+  $('btn-shutter').classList.remove('busy');
+  if (recCancel || !state.stream || state.mode !== 'camera') { mic?.getTracks().forEach((t) => t.stop()); return; }
+  const [rw, rh] = previewSize(...sourceSize(), true);
+  recCanvas.width = rw & ~1; recCanvas.height = rh & ~1;   // encoders want even sizes
+  const stream = recCanvas.captureStream(30);
+  mic?.getAudioTracks().forEach((t) => stream.addTrack(t));
+  const mimeType = videoMime();
+  let rec;
+  try { rec = new MediaRecorder(stream, { ...(mimeType && { mimeType }), videoBitsPerSecond: 8_000_000 }); }
+  catch { mic?.getTracks().forEach((t) => t.stop()); toast('This browser can’t record video.'); return; }
+  const r = { rec, mic, chunks: [], start: performance.now(), mirror: state.facing === 'user', timer: 0 };
+  rec.ondataavailable = (e) => { if (e.data.size) r.chunks.push(e.data); };
+  rec.onstop = () => finishRecording(r);
+  state.recording = r;
+  copyToRecorder();
+  rec.start(1000);
+  r.timer = setInterval(drawRecTimer, 250);
+  updateUI();
+}
+
+function copyToRecorder() {
+  const r = state.recording;
+  if (!r) return;
+  recCtx.save();
+  if (r.mirror) { recCtx.translate(recCanvas.width, 0); recCtx.scale(-1, 1); }
+  recCtx.drawImage(canvas, 0, 0, recCanvas.width, recCanvas.height);
+  recCtx.restore();
+}
+
+function stopRecording() {
+  const r = state.recording;
+  if (!r) return;
+  state.recording = null;
+  clearInterval(r.timer);
+  if (r.rec.state !== 'inactive') r.rec.stop(); else finishRecording(r);
+  updateUI();
+}
+
+async function finishRecording(r) {
+  r.mic?.getTracks().forEach((t) => t.stop());
+  const type = (r.rec.mimeType || r.chunks[0]?.type || 'video/webm').split(';')[0];
+  const blob = new Blob(r.chunks, { type });
+  if (!blob.size) { toast('Couldn’t record that video.'); return; }
+  recCanvas.toBlob((b) => b && setThumb(b), 'image/jpeg', 0.8);   // last frame as the thumbnail
+  const name = `FilmCam-${filmById(state.filmId)?.name.replace(/[^\w]+/g, '-') || 'video'}-${stamp()}.${type.includes('mp4') ? 'mp4' : 'webm'}`;
+  try { await saveBlob(blob, name); }
+  catch (e) {
+    if (e?.name === 'NotAllowedError') {   // iPhone: the share sheet needs a fresh tap
+      state.pendingVideo = { blob, name };
+      toast('Tap the thumbnail to save the video', 5000);
+    } else if (e?.name !== 'AbortError') toast('Couldn’t save the video.');
+  }
+}
+
+function drawRecTimer() {
+  const r = state.recording;
+  if (!r) return;
+  const s = Math.floor((performance.now() - r.start) / 1000);
+  $('rec-time').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+let micAsked = false;
+function pressShutter() {
+  if (state.videoMode && state.mode === 'camera') { if (state.recording) stopRecording(); else startRecording(); }
+  else shoot();
 }
 
 let thumbURL;
@@ -849,7 +981,6 @@ function updateUI() {
   $('btn-grid').classList.toggle('on', state.grid);
   $('look-name').textContent = filmById(state.filmId)?.name || 'Original';
   drawAdjust();
-  $('btn-ratio').disabled = still;
   $('btn-ratio').setAttribute('aria-label', `Frame size: ${state.ratio === 'full' ? 'full screen' : 'whole camera frame'}`);
   lastLayout = ''; state.dirty = true;
   $('grid').hidden = !state.grid;
@@ -858,9 +989,18 @@ function updateUI() {
   $('strength-row').classList.toggle('disabled', state.filmId === 'original');
   $('btn-back').hidden = !still;
   $('shutter-label').textContent = still ? 'Save' : '';
-  $('btn-shutter').setAttribute('aria-label', still ? 'Save photo' : 'Take photo');
+  const vid = state.videoMode && !still, rec = !!state.recording;
+  $('btn-shutter').setAttribute('aria-label', still ? 'Save photo' : vid ? (rec ? 'Stop recording' : 'Record video') : 'Take photo');
   $('btn-shutter').disabled = !(still || state.stream);
-  $('btn-flip').disabled = still || !state.stream;
+  $('btn-shutter').classList.toggle('video', vid);
+  $('btn-shutter').classList.toggle('recording', rec);
+  $('btn-flip').disabled = still || !state.stream || rec;
+  $('btn-ratio').disabled = still || rec;
+  $('btn-upload').disabled = rec;
+  $('mode-row').hidden = still;
+  for (const b of $('mode-row').children) { b.setAttribute('aria-checked', String((b.dataset.mode === 'video') === state.videoMode)); b.disabled = rec; }
+  $('rec-timer').hidden = !rec;
+  if (rec) drawRecTimer();
   $('btn-torch').hidden = still || $('btn-torch').hidden;
   if (still) hideStatus();
   drawFocusUI(false);
@@ -918,10 +1058,16 @@ function closePanels() {
 function bindUI() {
   $('btn-look').onclick = () => { setMenu(false); setPanel(openPanel === 'look' ? null : 'look'); };
   $('btn-adjust').onclick = () => { setMenu(false); setPanel(openPanel === 'adjust' ? null : 'adjust'); };
-  const setAdjust = (k, v) => { state.adjust[k] = v; store.set('adjust', state.adjust); state.dirty = true; updateUI(); };
+  const setAdjust = (k, v) => {
+    state.adjust[k] = v; store.set('adjust', state.adjust); state.dirty = true; updateUI();
+    if (k === 'dr' && state.focus.hwExposure) { const e = hwEV(state.focus.userEV); if (e !== null) applyTrack({ exposureCompensation: e }); }
+  };
   for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) input.oninput = () => setAdjust(input.dataset.k, Number(input.value));
   for (const seg of $('adjust-panel').querySelectorAll('.seg')) seg.onclick = (e) => { const b = e.target.closest('button'); if (b) setAdjust(seg.dataset.k, Number(b.dataset.v)); };
-  $('adj-reset').onclick = () => { state.adjust = { ...ADJUST_DEFAULTS }; store.set('adjust', state.adjust); state.dirty = true; updateUI(); };
+  $('adj-reset').onclick = () => {
+    state.adjust = { ...ADJUST_DEFAULTS }; store.set('adjust', state.adjust); state.dirty = true; updateUI();
+    if (state.focus.hwExposure) { const e = hwEV(state.focus.userEV); if (e !== null) applyTrack({ exposureCompensation: e }); }
+  };
   $('btn-more').onclick = (e) => { e.stopPropagation(); setMenu($('menu').hidden); };
   document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu, #btn-more')) setMenu(false); });
   $('menu').addEventListener('click', (e) => { if (e.target.closest('#btn-import, #btn-about')) setMenu(false); });
@@ -936,10 +1082,25 @@ function bindUI() {
   addEventListener('resize', () => { lastLayout = ''; state.dirty = true; });
   $('btn-about').onclick = () => $('about').showModal();
   $('btn-import').onclick = () => $('file-lut').click();
-  $('btn-upload').onclick = () => $('file-photo').click();
+  $('btn-upload').onclick = () => {
+    const v = state.pendingVideo;
+    if (v) { state.pendingVideo = null; saveBlob(v.blob, v.name).catch(() => {}); return; }
+    $('file-photo').click();
+  };
   $('status-upload').onclick = () => $('file-photo').click();
   $('btn-back').onclick = backToCamera;
-  $('btn-shutter').onclick = shoot;
+  $('btn-shutter').onclick = pressShutter;
+  $('mode-row').onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b || state.recording) return;
+    state.videoMode = b.dataset.mode === 'video';
+    updateUI();
+    // Ask for the microphone now (once), so pressing record starts straight away.
+    if (state.videoMode && !micAsked) {
+      micAsked = true;
+      navigator.mediaDevices?.getUserMedia({ audio: true }).then((s) => s.getTracks().forEach((t) => t.stop()), () => {});
+    }
+  };
   $('btn-flip').onclick = () => { state.facing = state.facing === 'user' ? 'environment' : 'user'; store.set('facing', state.facing); state.lens.stops = []; drawLenses(); startCamera(); };
   $('strength').oninput = (e) => { state.intensity = e.target.value / 100; store.set('intensity', state.intensity); state.dirty = true; updateUI(); };
   $('file-photo').onchange = (e) => { const f = e.target.files[0]; if (f) openPhoto(f); e.target.value = ''; };
@@ -951,12 +1112,12 @@ function bindUI() {
     if (e.target.closest('input, dialog')) return;
     if (e.key === 'ArrowRight') stepFilm(1);
     else if (e.key === 'ArrowLeft') stepFilm(-1);
-    else if ((e.key === ' ' || e.key === 'Enter') && !e.target.closest('button')) { e.preventDefault(); shoot(); }
+    else if ((e.key === ' ' || e.key === 'Enter') && !e.target.closest('button')) { e.preventDefault(); pressShutter(); }
   });
 
   // Pause the camera when the page is hidden (saves battery, frees the camera).
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { cameraRequest++; stopCamera(); updateUI(); }
+    if (document.hidden) { stopRecording(); cameraRequest++; stopCamera(); updateUI(); }
     else if (state.mode === 'camera' && !state.stream) startCamera();
   });
 }

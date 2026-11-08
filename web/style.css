@@ -180,6 +180,20 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   display: grid; place-items: center; font-size: 12px; font-weight: 700; transition: transform .15s;
 }
 .shutter:active span, .shutter.busy span { transform: scale(.86); }
+/* Video: a red dot that becomes a square while recording */
+.shutter.video span { background: #e5392f; transition: transform .15s, border-radius .2s, width .2s, height .2s; }
+.shutter.video.recording span { width: 44%; height: 44%; border-radius: 6px; }
+.shutter.video:active span { transform: none; }
+.mode-row { display: flex; justify-content: center; gap: 6px; margin-bottom: -4px; }
+.mode-row button { font-size: 12px; font-weight: 700; letter-spacing: .08em; padding: 5px 12px; border-radius: 999px; color: #fff; }
+.mode-row button[aria-checked="true"] { color: var(--accent); background: rgba(0,0,0,.45); }
+.mode-row button:disabled { opacity: .4; }
+.rec-timer {
+  position: absolute; z-index: 3; top: calc(env(safe-area-inset-top) + 56px); left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 6px; background: #e5392f; color: #fff; font-size: 13px; font-weight: 700;
+  padding: 3px 9px; border-radius: 4px; pointer-events: none; font-variant-numeric: tabular-nums;
+}
+.rec-timer i { width: 7px; height: 7px; border-radius: 50%; background: #fff; }
 
 /* About dialog */
 dialog {

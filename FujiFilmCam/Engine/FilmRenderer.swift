@@ -13,6 +13,10 @@ final class FilmRenderer: @unchecked Sendable {
     private struct State {
         var cube: CIFilter?
         var grain: Float = 0
+        var adjust = Adjustments.neutral
+        var drCube: CIFilter?
+        var drKey = ""
+        var drGainEV: Float = 0
         var version = 0
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -31,6 +35,12 @@ final class FilmRenderer: @unchecked Sendable {
     /// Bumped whenever settings change, so a still-image preview knows to redraw.
     var version: Int { state.withLock { $0.version } }
 
+    /// How far the camera is underexposed for DR200/400 right now (set by CameraController).
+    var drGainEV: Float {
+        get { state.withLock { $0.drGainEV } }
+        set { state.withLock { if $0.drGainEV != newValue { $0.drGainEV = newValue; $0.version += 1 } } }
+    }
+
     /// The look, its strength and the picture settings are baked into one colour cube,
     /// so the preview and the saved photo always match and extra settings cost nothing per frame.
     func configure(lut: LUT?, intensity: Float, grain: Float, adjust: Adjustments = .neutral) {
@@ -39,7 +49,7 @@ final class FilmRenderer: @unchecked Sendable {
             guard latestRequest.withLock({ $0 }) == request else { return }   // superseded by a newer change
             var cube: CIFilter?
             let look = intensity > 0.001 ? lut : nil
-            if look != nil || !adjust.isNeutral {
+            if look != nil || !adjust.isNeutralCube {
                 let size = 33
                 let f = CIFilter(name: "CIColorCubeWithColorSpace")!
                 f.setValue(size, forKey: "inputCubeDimension")
@@ -51,6 +61,7 @@ final class FilmRenderer: @unchecked Sendable {
             state.withLock {
                 $0.cube = newCube
                 $0.grain = grain
+                $0.adjust = adjust
                 $0.version += 1
             }
         }
@@ -58,18 +69,61 @@ final class FilmRenderer: @unchecked Sendable {
 
     /// Grain particle size is relative to the image (≈1px per 1080px of short edge),
     /// so the live preview and the full-resolution photo look the same.
-    func apply(to image: CIImage, animateGrain: Bool = true) -> CIImage {
+    /// `underexposedEV`: how far this image was underexposed for dynamic range (0 for library photos).
+    func apply(to image: CIImage, animateGrain: Bool = true, underexposedEV: Float = 0) -> CIImage {
         let grainScale = max(1, min(image.extent.width, image.extent.height) / 1080)
-        let (cube, grain) = state.withLock { s -> (CIFilter?, Float) in
-            (s.cube?.copy() as? CIFilter, s.grain)
+        let (cube, grain, adjust) = state.withLock { s -> (CIFilter?, Float, Adjustments) in
+            (s.cube?.copy() as? CIFilter, s.grain, s.adjust)
         }
-        var out = image
+        var out = detail(image, adjust)
+        let dr = adjust.drShader(underexposedEV: Double(underexposedEV))
+        if dr.knee < 1 || dr.gain != 1, let f = drCube(gain: dr.gain, knee: dr.knee) {
+            f.setValue(out, forKey: kCIInputImageKey)
+            out = f.outputImage ?? out
+        }
         if let cube {
             cube.setValue(out, forKey: kCIInputImageKey)
             out = cube.outputImage ?? out
         }
         if grain > 0 { out = addGrain(to: out, amount: grain, scale: grainScale, animate: animateGrain) }
         return out
+    }
+
+    /// Sharpness (one-pixel unsharp mask, or a slight blur) and Clarity (wide, gentle local contrast), as in the web shader.
+    private func detail(_ image: CIImage, _ a: Adjustments) -> CIImage {
+        let extent = image.extent
+        var out = image
+        func blurred(_ r: Double) -> CIImage {
+            out.clampedToExtent().applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: r]).cropped(to: extent)
+        }
+        func mix(_ target: CIImage, _ t: Double) -> CIImage {
+            out.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: target, kCIInputTimeKey: t]).cropped(to: extent)
+        }
+        if a.sharpness > 0 {
+            out = out.clampedToExtent().applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: 1.0, kCIInputIntensityKey: a.sharpAmount]).cropped(to: extent)
+        } else if a.sharpness < 0 {
+            out = mix(blurred(1.0), -a.sharpAmount)
+        }
+        if a.clarity != 0 {
+            let r = 0.012 * Double(min(extent.width, extent.height))
+            if a.clarity > 0 {
+                out = out.clampedToExtent().applyingFilter("CIUnsharpMask", parameters: [kCIInputRadiusKey: r, kCIInputIntensityKey: a.clarityAmount * 0.8]).cropped(to: extent)
+            } else {
+                out = mix(blurred(r * 0.5), -a.clarityAmount * 0.8)
+            }
+        }
+        return out
+    }
+
+    private func drCube(gain: Double, knee: Double) -> CIFilter? {
+        let key = "\(gain)|\(knee)"
+        if let f = state.withLock({ $0.drKey == key ? $0.drCube?.copy() as? CIFilter : nil }) { return f }
+        let f = CIFilter(name: "CIColorCubeWithColorSpace")!
+        f.setValue(33, forKey: "inputCubeDimension")
+        f.setValue(Adjustments.drCubeData(gain: gain, knee: knee), forKey: "inputCubeData")
+        f.setValue(srgb, forKey: "inputColorSpace")
+        state.withLock { $0.drCube = f; $0.drKey = key }
+        return f.copy() as? CIFilter
     }
 
     private func addGrain(to image: CIImage, amount: Float, scale: CGFloat, animate: Bool) -> CIImage {

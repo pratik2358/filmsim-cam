@@ -2,7 +2,8 @@ import Foundation
 import simd
 
 /// Fujifilm-style picture settings, baked together with the film look into one colour cube.
-/// Order follows the camera: white balance → film look (+ strength) → tone curve → Color Chrome.
+/// Order follows the camera: white balance → film look (+ strength) → tone curve → Color Chrome → Color.
+/// Dynamic range, Sharpness and Clarity aren't colour mappings; FilmRenderer applies them separately.
 /// This is a line-for-line port of web/adjust.js; keep the two in sync.
 struct Adjustments: Codable, Equatable, Sendable {
     var highlight: Double = 0    // −2 … +4, steps of 0.5 (Fujifilm "Highlight" tone)
@@ -12,9 +13,49 @@ struct Adjustments: Codable, Equatable, Sendable {
     var wbBlue: Double = 0       // −9 … +9 white-balance shift (blue ↔ yellow)
     var chrome: Int = 0          // Color Chrome Effect: 0 off, 1 weak, 2 strong
     var chromeBlue: Int = 0      // Color Chrome FX Blue: 0 off, 1 weak, 2 strong
+    var color: Int = 0           // −4 … +4 saturation (Fujifilm "Color")
+    var dr: Int = 100            // Dynamic range: 100, 200 or 400 (%)
+    var sharpness: Int = 0       // −4 … +4
+    var clarity: Int = 0         // −5 … +5 (midtone local contrast)
 
     static let neutral = Adjustments()
     var isNeutral: Bool { self == .neutral }
+    /// True when the colour cube is unaffected (only DR / sharpness / clarity changed).
+    var isNeutralCube: Bool { var a = self; a.dr = 100; a.sharpness = 0; a.clarity = 0; return a == .neutral }
+    /// Stops the camera underexposes for DR200 / DR400, like Fujifilm cameras.
+    var drStops: Int { dr == 400 ? 2 : dr == 200 ? 1 : 0 }
+    /// Same amounts as web/adjust.js: unsharp mask (+) or soften (−); midtone local contrast.
+    var sharpAmount: Double { sharpness > 0 ? 0.25 * Double(sharpness) : 0.15 * Double(sharpness) }
+    var clarityAmount: Double { 0.12 * Double(clarity) }
+
+    /// Dynamic range: linear gain and highlight-shoulder knee (1 = none). `underexposedEV` is how far the camera was
+    /// actually underexposed for DR (0 for library photos): the picture is brought back up and the highlights it kept
+    /// roll off smoothly. Without underexposure DR can only soften highlights. As web/adjust.js drShader.
+    func drShader(underexposedEV: Double) -> (gain: Double, knee: Double) {
+        let n = drStops
+        if n == 0 { return (1, 1) }
+        if underexposedEV > 0 { return (pow(2, underexposedEV), 0.55) }
+        return (1, n == 1 ? 0.7 : 0.5)
+    }
+
+    /// Colour-cube data (RGBA float32, red fastest) for the dynamic-range gain and shoulder, in sRGB.
+    static func drCubeData(gain: Double, knee k: Double, size: Int = 33) -> Data {
+        var rgba = [Float](repeating: 1, count: size * size * size * 4)
+        let s = 1 / Double(size - 1)
+        var i = 0
+        for b in 0..<size {
+            for g in 0..<size {
+                for r in 0..<size {
+                    var l = SIMD3(toLin(Double(r) * s), toLin(Double(g) * s), toLin(Double(b) * s)) * gain
+                    let m = max(l.x, l.y, l.z)
+                    if k < 1, m > k { l *= (k + (1 - k) * (1 - exp(-(m - k) / (1 - k)))) / m }
+                    rgba[i] = Float(toSrgb(clamp01(l.x))); rgba[i + 1] = Float(toSrgb(clamp01(l.y))); rgba[i + 2] = Float(toSrgb(clamp01(l.z)))
+                    i += 4
+                }
+            }
+        }
+        return rgba.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
 
     // MARK: White balance
 
@@ -98,7 +139,12 @@ struct Adjustments: Codable, Equatable, Sendable {
             let l = SIMD3<Double>(look.sample(SIMD3<Float>(c)))
             c += (l - c) * intensity
         }
-        return simd_clamp(colorChrome(tone(c)), .zero, .one)
+        c = colorChrome(tone(c))
+        if color != 0 {   // Fujifilm "Color": saturation (+4 → ×1.3, −4 → ×0.7)
+            let y = 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
+            c = y + (c - y) * (1 + 0.075 * Double(color))
+        }
+        return simd_clamp(c, .zero, .one)
     }
 
     /// Core Image colour-cube data (RGBA float32, red fastest) for the look, its strength and these settings.

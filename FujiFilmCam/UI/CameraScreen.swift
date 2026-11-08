@@ -21,9 +21,14 @@ struct CameraScreen: View {
     @AppStorage("adj.wbBlue") private var adjWBBlue = 0.0
     @AppStorage("adj.chrome") private var adjChrome = 0
     @AppStorage("adj.chromeBlue") private var adjChromeBlue = 0
+    @AppStorage("adj.color") private var adjColor = 0.0
+    @AppStorage("adj.dr") private var adjDR = 100
+    @AppStorage("adj.sharpness") private var adjSharpness = 0.0
+    @AppStorage("adj.clarity") private var adjClarity = 0.0
     private var adjustments: Adjustments {
         Adjustments(highlight: adjHighlight, shadow: adjShadow, kelvin: adjKelvin, wbRed: adjWBRed, wbBlue: adjWBBlue,
-                    chrome: adjChrome, chromeBlue: adjChromeBlue)
+                    chrome: adjChrome, chromeBlue: adjChromeBlue, color: Int(adjColor), dr: adjDR,
+                    sharpness: Int(adjSharpness), clarity: Int(adjClarity))
     }
 
     @State private var touch: Touch?
@@ -373,12 +378,17 @@ struct CameraScreen: View {
                 Spacer()
                 Button("Reset") {
                     adjHighlight = 0; adjShadow = 0; adjKelvin = 5500; adjWBRed = 0; adjWBBlue = 0; adjChrome = 0; adjChromeBlue = 0
+                    adjColor = 0; adjDR = 100; adjSharpness = 0; adjClarity = 0
                 }
                 .font(.subheadline.weight(.semibold)).foregroundStyle(.yellow)
                 .disabled(adjustments.isNeutral)
             }
+            ChoiceRow(label: "Dynamic range", selection: $adjDR, options: [(100, "DR100"), (200, "DR200"), (400, "DR400")])
             AdjustRow(label: "Highlight", value: $adjHighlight, range: -2...4, step: 0.5, neutral: 0, text: signed)
             AdjustRow(label: "Shadow", value: $adjShadow, range: -2...4, step: 0.5, neutral: 0, text: signed)
+            AdjustRow(label: "Color", value: $adjColor, range: -4...4, step: 1, neutral: 0, text: signed)
+            AdjustRow(label: "Sharpness", value: $adjSharpness, range: -4...4, step: 1, neutral: 0, text: signed)
+            AdjustRow(label: "Clarity", value: $adjClarity, range: -5...5, step: 1, neutral: 0, text: signed)
             AdjustRow(label: "Temperature", value: $adjKelvin, range: 2500...10000, step: 100, neutral: 5500) {
                 $0 == 5500 ? "As shot" : "\(Int($0))K"
             }
@@ -467,6 +477,7 @@ struct CameraScreen: View {
     private func applyLook() {
         let lut = library.lut(for: film)
         FilmRenderer.shared.configure(lut: lut, intensity: Float(intensity), grain: [0, 0.5, 1][grain], adjust: adjustments)
+        camera.updateDynamicRange(stops: adjustments.drStops)
     }
 
     private func flashBadge() {
@@ -657,11 +668,12 @@ private struct AdjustRow: View {
 private struct ChoiceRow: View {
     let label: String
     @Binding var selection: Int
+    var options: [(Int, String)] = [(0, "Off"), (1, "Weak"), (2, "Strong")]
     var body: some View {
         HStack(spacing: 12) {
             Text(label).font(.caption).foregroundStyle(.secondary).frame(width: 92, alignment: .leading)
             Picker(label, selection: $selection) {
-                Text("Off").tag(0); Text("Weak").tag(1); Text("Strong").tag(2)
+                ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
             }
             .pickerStyle(.segmented)
         }
