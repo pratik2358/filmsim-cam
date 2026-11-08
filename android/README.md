@@ -5,7 +5,8 @@ Same looks, picture settings and maths as the iPhone app and the website.
 
 - Live camera with the look applied on the GPU (one baked 33³ 3D LUT per frame), strength, film grain, grid
 - 12 camera looks + 15 film stocks (`app/src/main/assets/luts`, copied from `web/luts`), import `.cube` / Hald CLUT PNG
-- Picture settings: Highlight/Shadow tone, Kelvin temperature, R/B white-balance shift, Color Chrome, FX Blue
+- Picture settings in two tabs. Tone: Highlight/Shadow, Clarity, Sharpness. Color: Color (saturation), Kelvin temperature,
+  R/B white-balance shift, Color Chrome, FX Blue
   (`Adjustments.kt`, a port of `web/adjust.js`, unit-tested to match it exactly)
 - Tap to focus/expose, drag up/down for exposure, hold for AE/AF lock, swipe sideways to change look
 - 3:4 / 9:16 / Full frame (photos are cropped to what the viewfinder shows), zoom stops (.5×/1×/2×/5× when the phone has them), flash, front/back camera
