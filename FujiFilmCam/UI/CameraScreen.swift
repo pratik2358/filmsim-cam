@@ -22,12 +22,11 @@ struct CameraScreen: View {
     @AppStorage("adj.chrome") private var adjChrome = 0
     @AppStorage("adj.chromeBlue") private var adjChromeBlue = 0
     @AppStorage("adj.color") private var adjColor = 0.0
-    @AppStorage("adj.dr") private var adjDR = 100
     @AppStorage("adj.sharpness") private var adjSharpness = 0.0
     @AppStorage("adj.clarity") private var adjClarity = 0.0
     private var adjustments: Adjustments {
         Adjustments(highlight: adjHighlight, shadow: adjShadow, kelvin: adjKelvin, wbRed: adjWBRed, wbBlue: adjWBBlue,
-                    chrome: adjChrome, chromeBlue: adjChromeBlue, color: Int(adjColor), dr: adjDR,
+                    chrome: adjChrome, chromeBlue: adjChromeBlue, color: Int(adjColor),
                     sharpness: Int(adjSharpness), clarity: Int(adjClarity))
     }
 
@@ -378,12 +377,11 @@ struct CameraScreen: View {
                 Spacer()
                 Button("Reset") {
                     adjHighlight = 0; adjShadow = 0; adjKelvin = 5500; adjWBRed = 0; adjWBBlue = 0; adjChrome = 0; adjChromeBlue = 0
-                    adjColor = 0; adjDR = 100; adjSharpness = 0; adjClarity = 0
+                    adjColor = 0; adjSharpness = 0; adjClarity = 0
                 }
                 .font(.subheadline.weight(.semibold)).foregroundStyle(.yellow)
                 .disabled(adjustments.isNeutral)
             }
-            ChoiceRow(label: "Dynamic range", selection: $adjDR, options: [(100, "DR100"), (200, "DR200"), (400, "DR400")])
             AdjustRow(label: "Highlight", value: $adjHighlight, range: -2...4, step: 0.5, neutral: 0, text: signed)
             AdjustRow(label: "Shadow", value: $adjShadow, range: -2...4, step: 0.5, neutral: 0, text: signed)
             AdjustRow(label: "Color", value: $adjColor, range: -4...4, step: 1, neutral: 0, text: signed)
@@ -477,7 +475,6 @@ struct CameraScreen: View {
     private func applyLook() {
         let lut = library.lut(for: film)
         FilmRenderer.shared.configure(lut: lut, intensity: Float(intensity), grain: [0, 0.5, 1][grain], adjust: adjustments)
-        camera.updateDynamicRange(stops: adjustments.drStops)
     }
 
     private func flashBadge() {

@@ -1,7 +1,7 @@
 // FilmCam for the web: live camera with film looks applied on the GPU (WebGL2 + 3D LUTs).
 // Everything runs locally; nothing is uploaded.
 
-import { ADJUST_DEFAULTS, isDefaultAdjust, bakeLUT, drStops, drShader, sharpAmount, clarityAmount, lutKey, isNeutralLut } from './adjust.js';
+import { ADJUST_DEFAULTS, isDefaultAdjust, bakeLUT, sharpAmount, clarityAmount, lutKey, isNeutralLut } from './adjust.js';
 
 const LUT_SIZE = 33;
 
@@ -53,7 +53,8 @@ const state = {
   grain: store.get('grain', 0),
   grid: store.get('grid', false),
   ratio: store.get('ratio', 'full'),
-  adjust: { ...ADJUST_DEFAULTS, ...store.get('adjust', {}) },   // tone, white balance, Color Chrome   // 'full' = fill the screen (crops the edges) | 'fit' = the camera's whole frame
+  // Picture settings (only known ones, so settings from older versions don't linger)
+  adjust: Object.fromEntries(Object.keys(ADJUST_DEFAULTS).map((k) => [k, store.get('adjust', {})[k] ?? ADJUST_DEFAULTS[k]])),
   crop: { x: 0, y: 0, w: 1, h: 1 },   // part of the source that's visible (and saved)
   facing: store.get('facing', 'environment'),
   mode: 'camera',          // 'camera' | 'still'
@@ -86,7 +87,7 @@ const FRAG = `#version 300 es
 precision highp float; precision highp sampler3D;
 in vec2 vUv; out vec4 outColor;
 uniform sampler2D uImage; uniform sampler3D uLut;
-uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed, uGain, uKnee;
+uniform bool uHasLut; uniform float uIntensity, uGrain, uGrainScale, uSeed, uGain;
 uniform vec2 uPx, uClarityR; uniform float uSharp, uClarity, uClarityLod;
 const vec3 LUM = vec3(0.2126, 0.7152, 0.0722);
 vec3 toLin(vec3 c) { return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c)); }
@@ -115,13 +116,15 @@ void main() {
     float y = dot(c, LUM), d = y - dot(b / 9.0, LUM);
     c += uClarity * d * 4.0 * y * (1.0 - y);
   }
-  // Exposure gain (software metering, dynamic range) with a highlight shoulder: bright areas roll off
-  // smoothly towards white instead of clipping. Applied to the brightest channel so colours keep their hue.
-  float K = min(uKnee, uGain > 1.0 ? 0.55 : 1.0);
-  if (uGain != 1.0 || K < 1.0) {
+  if (uGain != 1.0) {
     vec3 l = toLin(clamp(c, 0.0, 1.0)) * uGain;
-    float m = max(max(l.r, l.g), l.b);
-    if (K < 1.0 && m > K) l *= (K + (1.0 - K) * (1.0 - exp(-(m - K) / (1.0 - K)))) / m;
+    if (uGain > 1.0) {
+      // Highlight shoulder: brightening rolls bright areas off smoothly towards white instead of
+      // clipping them. Applied to the brightest channel so colours keep their hue.
+      const float K = 0.55;
+      float m = max(max(l.r, l.g), l.b);
+      if (m > K) l *= (K + (1.0 - K) * (1.0 - exp(-(m - K) / (1.0 - K)))) / m;
+    }
     c = toSrgb(clamp(l, 0.0, 1.0));
   }
   if (uHasLut) {
@@ -154,7 +157,7 @@ function initGL() {
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
   gl.useProgram(prog);
   loc = Object.fromEntries(['uImage', 'uLut', 'uHasLut', 'uIntensity', 'uGrain', 'uGrainScale', 'uSeed', 'uMirror', 'uGain', 'uCrop',
-    'uKnee', 'uPx', 'uClarityR', 'uSharp', 'uClarity', 'uClarityLod']
+    'uPx', 'uClarityR', 'uSharp', 'uClarity', 'uClarityLod']
     .map((n) => [n, gl.getUniformLocation(prog, n)]));
   const buf = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -219,9 +222,7 @@ function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL
   gl.uniform1f(loc.uClarity, clarityAmount(a.clarity));
   gl.uniform2f(loc.uClarityR, r / sw, r / sh);
   gl.uniform1f(loc.uClarityLod, Math.log2(Math.max(1, r * 0.5)));
-  const camera = state.mode === 'camera';
-  const dr = drShader(a, camera && state.focus.hwExposure ? drStops(a) : 0);
-  gl.uniform1f(loc.uKnee, dr.knee);
+
   const tex = currentLutTexture();
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_3D, tex);
@@ -233,7 +234,7 @@ function render(source, w, h, { animateGrain = true, mirror = false, crop = FULL
   gl.uniform1f(loc.uSeed, animateGrain ? Math.random() * 1000 : 0);
   gl.uniform1i(loc.uMirror, mirror ? 1 : 0);
   gl.uniform4f(loc.uCrop, crop.x, crop.y, crop.w, crop.h);
-  gl.uniform1f(loc.uGain, (camera ? Math.pow(2, softwareEV()) : 1) * dr.gain);
+  gl.uniform1f(loc.uGain, state.mode === 'camera' ? Math.pow(2, softwareEV()) : 1);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -384,12 +385,12 @@ function setupFocus() {
   resetFocus(false);
 }
 
-/** Hardware exposure compensation for `ev`, minus the stops DR200/400 underexpose by (null if unsupported). */
+/** Hardware exposure compensation for `ev`, in the camera's steps (null if unsupported). */
 function hwEV(ev) {
   const c = track()?.getCapabilities?.().exposureCompensation;
   if (!c) return null;
   const step = c.step || 0.1;
-  return Math.max(c.min, Math.min(c.max, Math.round((ev - drStops(state.adjust)) / step) * step));
+  return Math.max(c.min, Math.min(c.max, Math.round(ev / step) * step));
 }
 
 async function applyTrack(c) {
@@ -1060,13 +1061,11 @@ function bindUI() {
   $('btn-adjust').onclick = () => { setMenu(false); setPanel(openPanel === 'adjust' ? null : 'adjust'); };
   const setAdjust = (k, v) => {
     state.adjust[k] = v; store.set('adjust', state.adjust); state.dirty = true; updateUI();
-    if (k === 'dr' && state.focus.hwExposure) { const e = hwEV(state.focus.userEV); if (e !== null) applyTrack({ exposureCompensation: e }); }
   };
   for (const input of $('adjust-panel').querySelectorAll('input[data-k]')) input.oninput = () => setAdjust(input.dataset.k, Number(input.value));
   for (const seg of $('adjust-panel').querySelectorAll('.seg')) seg.onclick = (e) => { const b = e.target.closest('button'); if (b) setAdjust(seg.dataset.k, Number(b.dataset.v)); };
   $('adj-reset').onclick = () => {
     state.adjust = { ...ADJUST_DEFAULTS }; store.set('adjust', state.adjust); state.dirty = true; updateUI();
-    if (state.focus.hwExposure) { const e = hwEV(state.focus.userEV); if (e !== null) applyTrack({ exposureCompensation: e }); }
   };
   $('btn-more').onclick = (e) => { e.stopPropagation(); setMenu($('menu').hidden); };
   document.addEventListener('pointerdown', (e) => { if (!e.target.closest('#menu, #btn-more')) setMenu(false); });

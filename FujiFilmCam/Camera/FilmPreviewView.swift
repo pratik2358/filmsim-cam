@@ -61,7 +61,7 @@ final class PreviewMTKView: MTKView, MTKViewDelegate {
         if portrait.enabled, let d = frames.disparity, let focus = portrait.focusDisparity {
             scaled = Portrait.previewBlur(scaled, disparity: d, focus: focus, aperture: portrait.aperture)
         }
-        scaled = renderer.apply(to: scaled, underexposedEV: fit ? 0 : renderer.drGainEV)   // fit = a library photo
+        scaled = renderer.apply(to: scaled)
         let dx = (size.width - src.width * scale) / 2, dy = (size.height - src.height * scale) / 2
         let placed = scaled.transformed(by: CGAffineTransform(translationX: dx, y: dy))
             .composited(over: CIImage(color: .black))

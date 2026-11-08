@@ -208,7 +208,7 @@ final class CameraController: NSObject, ObservableObject {
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
             if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = centre }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
-            applyBias(0, device)
+            device.setExposureTargetBias(0, completionHandler: nil)
             device.isSubjectAreaChangeMonitoringEnabled = false
             device.unlockForConfiguration()
         } catch {}
@@ -238,7 +238,7 @@ final class CameraController: NSObject, ObservableObject {
                 if lock, device.isExposureModeSupported(.autoExpose) { device.exposureMode = .autoExpose }
                 else if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
             }
-            applyBias(0, device)
+            device.setExposureTargetBias(0, completionHandler: nil)
             device.isSubjectAreaChangeMonitoringEnabled = !lock
             device.unlockForConfiguration()
         } catch { return }
@@ -251,28 +251,15 @@ final class CameraController: NSObject, ObservableObject {
 
     func setExposureBias(_ ev: Float) {
         guard let device = input?.device else { return }
-        let v = min(max(ev, Self.exposureRange.lowerBound), Self.exposureRange.upperBound)
+        let lo = max(device.minExposureTargetBias, Self.exposureRange.lowerBound)
+        let hi = min(device.maxExposureTargetBias, Self.exposureRange.upperBound)
+        let v = min(max(ev, lo), hi)
         do {
             try device.lockForConfiguration()
-            applyBias(v, device)
+            device.setExposureTargetBias(v, completionHandler: nil)
             device.unlockForConfiguration()
             exposureBias = v
         } catch {}
-    }
-
-    /// Dynamic range: DR200/400 underexpose the sensor by 1/2 stops; the renderer brings the picture back up.
-    private var drStops: Float = 0
-    func updateDynamicRange(stops: Int) {
-        guard Float(stops) != drStops else { return }
-        drStops = Float(stops)
-        setExposureBias(exposureBias)
-    }
-
-    /// Sets the device bias for the user's `ev` minus the DR underexposure (device must be locked for configuration).
-    private func applyBias(_ ev: Float, _ device: AVCaptureDevice) {
-        let hw = min(max(ev - drStops, device.minExposureTargetBias), device.maxExposureTargetBias)
-        device.setExposureTargetBias(hw, completionHandler: nil)
-        FilmRenderer.shared.drGainEV = drStops > 0 ? min(max(ev - hw, 0), drStops) : 0
     }
 
     private func observeSubjectArea(_ device: AVCaptureDevice) {
@@ -388,7 +375,7 @@ final class CameraController: NSObject, ObservableObject {
             let angle = rotation?.videoRotationAngleForHorizonLevelCapture ?? 90
             if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
         }
-        let delegate = PhotoDelegate(portrait: portraitParams, crop: visibleRect.size, underexposedEV: FilmRenderer.shared.drGainEV) { [weak self] result in
+        let delegate = PhotoDelegate(portrait: portraitParams, crop: visibleRect.size) { [weak self] result in
             Task { @MainActor in
                 self?.inFlight[settings.uniqueID] = nil
                 self?.finish(result)
@@ -452,9 +439,8 @@ private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unc
     let completion: (Result<PhotoProcessor.Output, Error>) -> Void
     let portrait: PortraitSettings?
     let crop: CGSize
-    let underexposedEV: Float
-    init(portrait: PortraitSettings?, crop: CGSize, underexposedEV: Float, completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) {
-        self.portrait = portrait; self.crop = crop; self.underexposedEV = underexposedEV; self.completion = completion
+    init(portrait: PortraitSettings?, crop: CGSize, completion: @escaping (Result<PhotoProcessor.Output, Error>) -> Void) {
+        self.portrait = portrait; self.crop = crop; self.completion = completion
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
@@ -463,14 +449,14 @@ private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unc
               let image = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
             completion(.failure(PhotoProcessor.Failure.encode)); return
         }
-        let completion = completion, portrait = portrait, crop = crop, ev = underexposedEV
+        let completion = completion, portrait = portrait, crop = crop
         DispatchQueue.global(qos: .userInitiated).async {
             var source = image
             if let portrait, let blurred = PhotoProcessor.portraitBlur(data: data, oriented: image, settings: portrait) {
                 source = blurred
             }
             source = PhotoProcessor.centerCrop(source, portraitFraction: crop)   // save what the viewfinder showed
-            completion(PhotoProcessor.render(source, properties: image.properties, underexposedEV: ev))
+            completion(PhotoProcessor.render(source, properties: image.properties))
         }
     }
 }
@@ -497,10 +483,10 @@ enum PhotoProcessor {
         return image.cropped(to: rect).transformed(by: CGAffineTransform(translationX: -rect.minX, y: -rect.minY))
     }
 
-    static func render(_ image: CIImage, properties: [String: Any], underexposedEV: Float = 0) -> Result<Output, Error> {
+    static func render(_ image: CIImage, properties: [String: Any]) -> Result<Output, Error> {
         let renderer = FilmRenderer.shared
         let extent = image.extent
-        let filtered = renderer.apply(to: image, animateGrain: false, underexposedEV: underexposedEV)
+        let filtered = renderer.apply(to: image, animateGrain: false)
 
         var props = properties
         props[kCGImagePropertyOrientation as String] = 1

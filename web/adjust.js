@@ -1,7 +1,7 @@
 // Fujifilm-style picture settings, baked together with the film look into one 3D LUT.
 // Order follows the camera: white balance → film look (+ strength) → tone curve → Color Chrome → Color.
-// Dynamic range, Sharpness and Clarity can't live in a colour LUT; they're applied in the shader (see
-// drShader / SHARPNESS / CLARITY below, used by the same shaders in all three apps).
+// Sharpness and Clarity can't live in a colour LUT; they're applied in the shader (amounts below,
+// used by the same shaders in all three apps).
 // The iOS app has a line-for-line port in FujiFilmCam/Engine/Adjustments.swift; keep them in sync.
 
 export const ADJUST_DEFAULTS = Object.freeze({
@@ -13,7 +13,6 @@ export const ADJUST_DEFAULTS = Object.freeze({
   chrome: 0,       // Color Chrome Effect: 0 off, 1 weak, 2 strong
   chromeBlue: 0,   // Color Chrome FX Blue: 0 off, 1 weak, 2 strong
   color: 0,        // −4 … +4 saturation (Fujifilm "Color")
-  dr: 100,         // Dynamic range: 100, 200 or 400 (%)
   sharpness: 0,    // −4 … +4
   clarity: 0,      // −5 … +5 (midtone local contrast)
 });
@@ -97,22 +96,6 @@ function colour(c, a) {
   if (!a.color) return c;
   const y = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2], k = 1 + COLOR_STEP * a.color;
   return [y + (c[0] - y) * k, y + (c[1] - y) * k, y + (c[2] - y) * k];
-}
-
-/** Stops the camera underexposes for DR200 / DR400, like Fujifilm cameras. */
-export const drStops = (a) => (a.dr === 400 ? 2 : a.dr === 200 ? 1 : 0);
-
-/**
- * Shader parameters for dynamic range: linear `gain` and highlight-shoulder `knee` (1 = no shoulder).
- * `underexposedEV`: how far the camera was actually underexposed for it (0 for photos opened from the library,
- * or when the camera's exposure can't be set). Then the picture is brought back up and the highlights the
- * camera kept are rolled off smoothly. Without underexposure, DR can only soften the highlights.
- */
-export function drShader(a, underexposedEV) {
-  const n = drStops(a);
-  if (!n) return { gain: 1, knee: 1 };
-  if (underexposedEV > 0) return { gain: 2 ** underexposedEV, knee: 0.55 };
-  return { gain: 1, knee: n === 1 ? 0.7 : 0.5 };
 }
 
 /** Shader amounts. Sharpness: unsharp mask on luminance (+) or a soften (−). Clarity: midtone local contrast. */
